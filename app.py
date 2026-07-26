@@ -40,7 +40,15 @@ def find_tool(name: str) -> str | None:
 
 def codec(value: object) -> str:
     raw = str(value or "?").split(".", 1)[0].lower()
-    return {"avc1": "H.264", "h264": "H.264", "av01": "AV1", "vp09": "VP9", "mp4a": "AAC"}.get(raw, raw.upper())
+    aliases = {
+        "avc1": "H.264",
+        "h264": "H.264",
+        "av01": "AV1",
+        "vp09": "VP9",
+        "vp9": "VP9",
+        "mp4a": "AAC",
+    }
+    return aliases.get(raw, raw.upper())
 
 
 def duration(value: object) -> str:
@@ -56,22 +64,25 @@ class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("760x170")
-        self.minsize(620, 150)
+        self.geometry("760x210")
+        self.minsize(620, 190)
         self.configure(fg_color=("#f6f6f4", "#181818"))
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
         self.analysis_timer: str | None = None
         self.analyzed_url = ""
-        self.video_formats: dict[str, dict[str, Any]] = {}
+
+        self.video_groups: dict[str, dict[str, dict[str, Any]]] = {}
         self.audio_formats: dict[str, dict[str, Any]] = {}
         self.quality_buttons: list[ctk.CTkButton] = []
-        self.selected_video = ""
+        self.codec_buttons: list[ctk.CTkButton] = []
+        self.selected_quality = ""
+        self.selected_codec = ""
         self.selected_audio = ""
+
         self.revealed = False
         self.log_open = False
-
         self.url_var = ctk.StringVar()
         self.mode_var = ctk.StringVar(value="Видео")
         self.output_var = ctk.StringVar(value=str(downloads_dir()))
@@ -91,24 +102,29 @@ class App(ctk.CTk):
         self.grid_rowconfigure(1, weight=1)
 
         search = ctk.CTkFrame(self, fg_color="transparent")
-        search.grid(row=0, column=0, sticky="ew", padx=34, pady=34)
+        search.grid(row=0, column=0, sticky="ew", padx=34, pady=30)
         search.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            search,
+            text="Вставьте сюда ссылку на видео",
+            anchor="w",
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 9))
         self.url_entry = ctk.CTkEntry(
             search,
             textvariable=self.url_var,
             height=54,
             corner_radius=14,
             border_width=1,
-            placeholder_text="Вставьте ссылку на видео",
-            font=ctk.CTkFont(size=16),
+            placeholder_text="https://www.youtube.com/watch?v=…",
+            font=ctk.CTkFont(size=15),
         )
-        self.url_entry.grid(row=0, column=0, sticky="ew")
+        self.url_entry.grid(row=1, column=0, sticky="ew")
         self.url_entry.bind("<KeyRelease>", self._url_changed)
         self.url_entry.bind("<<Paste>>", lambda _event: self.after(50, self._url_changed))
         self.url_entry.bind("<Return>", lambda _event: self._analyze_now())
         self.url_entry.focus_set()
-
-        self.loading = ctk.CTkProgressBar(search, width=70, height=3, mode="indeterminate")
+        self.loading = ctk.CTkProgressBar(search, height=3, mode="indeterminate")
 
         self.content = ctk.CTkFrame(self, fg_color="transparent")
         self.content.grid_columnconfigure(0, weight=1)
@@ -117,29 +133,55 @@ class App(ctk.CTk):
         info.grid(row=0, column=0, sticky="ew", padx=34)
         info.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            info, textvariable=self.title_var, anchor="w", justify="left",
-            font=ctk.CTkFont(size=21, weight="bold"), wraplength=690,
+            info,
+            textvariable=self.title_var,
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=21, weight="bold"),
+            wraplength=750,
         ).grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(
-            info, textvariable=self.meta_var, anchor="w",
-            text_color=("#747474", "#a5a5a5"), font=ctk.CTkFont(size=13),
+            info,
+            textvariable=self.meta_var,
+            anchor="w",
+            text_color=("#747474", "#a5a5a5"),
+            font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
         self.mode = ctk.CTkSegmentedButton(
-            self.content, values=["Видео", "Аудио"], variable=self.mode_var,
-            command=self._mode_changed, height=38, corner_radius=10,
+            self.content,
+            values=["Видео", "Аудио"],
+            variable=self.mode_var,
+            command=self._mode_changed,
+            height=38,
+            corner_radius=10,
         )
-        self.mode.grid(row=1, column=0, sticky="ew", padx=34, pady=(22, 0))
+        self.mode.grid(row=1, column=0, sticky="ew", padx=34, pady=(20, 0))
 
         self.quality_frame = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.quality_frame.grid(row=2, column=0, sticky="ew", padx=34, pady=(18, 0))
+        self.quality_frame.grid(row=2, column=0, sticky="ew", padx=30, pady=(14, 0))
         for column in range(4):
             self.quality_frame.grid_columnconfigure(column, weight=1, uniform="quality")
+
+        self.codec_section = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.codec_section.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self.codec_section,
+            text="Кодек",
+            anchor="w",
+            text_color=("#747474", "#a5a5a5"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.codec_frame = ctk.CTkFrame(self.codec_section, fg_color="transparent")
+        self.codec_frame.grid(row=1, column=0, sticky="ew")
+        for column in range(4):
+            self.codec_frame.grid_columnconfigure(column, weight=1, uniform="codec")
 
         self.audio_options = ctk.CTkFrame(self.content, fg_color="transparent")
         self.audio_options.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            self.audio_options, text="Формат файла", anchor="w",
+            self.audio_options,
+            text="Формат файла",
+            anchor="w",
             text_color=("#747474", "#a5a5a5"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.audio_output = ctk.CTkOptionMenu(
@@ -151,67 +193,102 @@ class App(ctk.CTk):
         self.audio_output.grid(row=1, column=0, sticky="ew")
 
         options = ctk.CTkFrame(self.content, fg_color="transparent")
-        options.grid(row=4, column=0, sticky="ew", padx=34, pady=(20, 0))
+        options.grid(row=4, column=0, sticky="ew", padx=34, pady=(18, 0))
         options.grid_columnconfigure(1, weight=1)
         self.separate_check = ctk.CTkCheckBox(
-            options, text="Скачать видео и аудио отдельно", variable=self.separate_var,
-            checkbox_width=20, checkbox_height=20,
+            options,
+            text="Скачать видео и аудио отдельно",
+            variable=self.separate_var,
+            checkbox_width=20,
+            checkbox_height=20,
         )
         self.separate_check.grid(row=0, column=0, sticky="w")
         self.playlist_check = ctk.CTkCheckBox(
-            options, text="Скачать весь плейлист", variable=self.playlist_var,
-            checkbox_width=20, checkbox_height=20,
+            options,
+            text="Скачать весь плейлист",
+            variable=self.playlist_var,
+            checkbox_width=20,
+            checkbox_height=20,
         )
         self.playlist_check.grid(row=0, column=1, sticky="e")
 
         destination = ctk.CTkFrame(self.content, fg_color="transparent")
-        destination.grid(row=5, column=0, sticky="ew", padx=34, pady=(16, 0))
+        destination.grid(row=5, column=0, sticky="ew", padx=34, pady=(15, 0))
         destination.grid_columnconfigure(0, weight=1)
         self.folder_button = ctk.CTkButton(
-            destination, text=self._folder_label(), anchor="w", height=36,
-            fg_color="transparent", border_width=1,
-            text_color=("#555555", "#c7c7c7"), command=self._choose_folder,
+            destination,
+            text=self._folder_label(),
+            anchor="w",
+            height=36,
+            fg_color="transparent",
+            border_width=1,
+            text_color=("#555555", "#c7c7c7"),
+            command=self._choose_folder,
         )
         self.folder_button.grid(row=0, column=0, sticky="ew")
 
         actions = ctk.CTkFrame(self.content, fg_color="transparent")
-        actions.grid(row=6, column=0, sticky="ew", padx=34, pady=(20, 0))
+        actions.grid(row=6, column=0, sticky="ew", padx=34, pady=(18, 0))
         actions.grid_columnconfigure(0, weight=1)
         self.download_button = ctk.CTkButton(
-            actions, text="Скачать", height=48, corner_radius=12,
-            font=ctk.CTkFont(size=15, weight="bold"), command=self._download,
+            actions,
+            text="Скачать видео с аудио",
+            height=48,
+            corner_radius=12,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._download,
         )
         self.download_button.grid(row=0, column=0, sticky="ew")
         self.cancel_button = ctk.CTkButton(
-            actions, text="Отмена", width=90, height=48, corner_radius=12,
-            fg_color="transparent", border_width=1,
-            text_color=("#555555", "#d0d0d0"), command=self._cancel,
+            actions,
+            text="Отмена",
+            height=48,
+            corner_radius=12,
+            fg_color="transparent",
+            border_width=1,
+            text_color=("#555555", "#d0d0d0"),
+            command=self._cancel,
         )
         self.status = ctk.CTkLabel(
-            actions, textvariable=self.status_var, anchor="w",
+            actions,
+            textvariable=self.status_var,
+            anchor="w",
             text_color=("#747474", "#a5a5a5"),
         )
-        self.status.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.status.grid(row=1, column=0, sticky="ew", pady=(7, 0))
         self.progress = ctk.CTkProgressBar(actions, height=7)
         self.progress.set(0)
 
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
-        footer.grid(row=7, column=0, sticky="ew", padx=34, pady=(10, 22))
+        footer.grid(row=7, column=0, sticky="ew", padx=34, pady=(8, 20))
         footer.grid_columnconfigure(1, weight=1)
         self.log_button = ctk.CTkButton(
-            footer, text="Подробности", width=100, height=28,
-            fg_color="transparent", text_color=("#666666", "#aaaaaa"),
-            hover_color=("#e9e9e6", "#252525"), command=self._toggle_log,
+            footer,
+            text="Подробности",
+            width=100,
+            height=28,
+            fg_color="transparent",
+            text_color=("#666666", "#aaaaaa"),
+            hover_color=("#e9e9e6", "#252525"),
+            command=self._toggle_log,
         )
         self.log_button.grid(row=0, column=0, sticky="w")
         self.open_button = ctk.CTkButton(
-            footer, text="Открыть папку", width=110, height=28,
-            fg_color="transparent", text_color=("#666666", "#aaaaaa"),
-            hover_color=("#e9e9e6", "#252525"), command=self._open_folder,
+            footer,
+            text="Открыть папку",
+            width=110,
+            height=28,
+            fg_color="transparent",
+            text_color=("#666666", "#aaaaaa"),
+            hover_color=("#e9e9e6", "#252525"),
+            command=self._open_folder,
         )
-
         self.log = ctk.CTkTextbox(
-            self.content, height=170, corner_radius=10, wrap="word", font=("Consolas", 11)
+            self.content,
+            height=170,
+            corner_radius=10,
+            wrap="word",
+            font=("Consolas", 11),
         )
         self.log.configure(state="disabled")
 
@@ -232,7 +309,7 @@ class App(ctk.CTk):
             messagebox.showerror(APP_NAME, "yt-dlp не найден рядом с программой.")
             return
         self._hide_content()
-        self.loading.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        self.loading.grid(row=2, column=0, sticky="ew", pady=(7, 0))
         self.loading.start()
         self.process = subprocess.Popen(
             [executable, "--dump-single-json", "--no-playlist", "--no-warnings", url],
@@ -269,7 +346,7 @@ class App(ctk.CTk):
         self._prepare_formats(data.get("formats") or [])
         self._reveal_content()
         self._mode_changed(self.mode_var.get())
-        self.status_var.set("Готово к скачиванию")
+        self.status_var.set("Выберите качество и кодек")
 
     def _prepare_formats(self, formats: list[dict[str, Any]]) -> None:
         video_candidates: list[dict[str, Any]] = []
@@ -284,28 +361,37 @@ class App(ctk.CTk):
             elif vcodec == "none" and acodec != "none":
                 audio_candidates.append(item)
 
-        best_video: dict[tuple[int, int], dict[str, Any]] = {}
+        grouped: dict[tuple[int, int], dict[str, dict[str, Any]]] = {}
         for item in video_candidates:
-            key = (int(item.get("height") or 0), int(item.get("fps") or 0))
-            old = best_video.get(key)
-            score = (str(item.get("acodec") or "none") == "none", float(item.get("tbr") or 0))
-            old_score = (-1, -1.0) if old is None else (
-                str(old.get("acodec") or "none") == "none", float(old.get("tbr") or 0)
-            )
-            if score > old_score:
-                best_video[key] = item
-
-        videos = sorted(best_video.values(), key=lambda x: (int(x.get("height") or 0), float(x.get("fps") or 0)), reverse=True)[:8]
-        audios = sorted(audio_candidates, key=lambda x: (float(x.get("abr") or x.get("tbr") or 0), float(x.get("filesize") or 0)), reverse=True)[:8]
-
-        self.video_formats.clear()
-        for item in videos:
             height = int(item.get("height") or 0)
             fps = int(item.get("fps") or 0)
-            detail = f"{fps} FPS · {codec(item.get('vcodec'))}" if fps else codec(item.get("vcodec"))
-            label = f"{height}p\n{detail}"
-            self.video_formats[label] = item
+            quality_key = (height, fps)
+            codec_label = f"{codec(item.get('vcodec'))} · {str(item.get('ext') or '?').upper()}"
+            previous = grouped.setdefault(quality_key, {}).get(codec_label)
+            score = (
+                str(item.get("acodec") or "none") == "none",
+                float(item.get("tbr") or 0),
+            )
+            previous_score = (-1, -1.0) if previous is None else (
+                str(previous.get("acodec") or "none") == "none",
+                float(previous.get("tbr") or 0),
+            )
+            if score > previous_score:
+                grouped[quality_key][codec_label] = item
 
+        self.video_groups.clear()
+        for (height, fps), codecs in sorted(grouped.items(), reverse=True)[:8]:
+            quality_label = f"{height}p\n{fps} FPS" if fps else f"{height}p"
+            self.video_groups[quality_label] = codecs
+
+        audios = sorted(
+            audio_candidates,
+            key=lambda item: (
+                float(item.get("abr") or item.get("tbr") or 0),
+                float(item.get("filesize") or 0),
+            ),
+            reverse=True,
+        )[:8]
         self.audio_formats.clear()
         for item in audios:
             abr = int(float(item.get("abr") or item.get("tbr") or 0))
@@ -313,63 +399,113 @@ class App(ctk.CTk):
             if label not in self.audio_formats:
                 self.audio_formats[label] = item
 
-        self.selected_video = next(iter(self.video_formats), "")
+        self.selected_quality = next(iter(self.video_groups), "")
+        codecs = self.video_groups.get(self.selected_quality, {})
+        self.selected_codec = next(iter(codecs), "")
         self.selected_audio = next(iter(self.audio_formats), "")
 
-    def _render_quality_buttons(self, source: dict[str, dict[str, Any]], selected: str) -> None:
+    def _render_quality_buttons(self) -> None:
         for button in self.quality_buttons:
             button.destroy()
         self.quality_buttons.clear()
+        source = self.video_groups if self.mode_var.get() == "Видео" else self.audio_formats
+        selected = self.selected_quality if self.mode_var.get() == "Видео" else self.selected_audio
         for index, label in enumerate(source):
             active = label == selected
-            button = ctk.CTkButton(
+            button = self._choice_button(
                 self.quality_frame,
-                text=label,
+                label,
+                active,
+                lambda value=label: self._select_quality(value),
                 height=58,
-                corner_radius=10,
-                fg_color=("#2783de", "#3b8ed0") if active else ("#ffffff", "#242424"),
-                text_color="#ffffff" if active else ("#333333", "#eeeeee"),
-                border_width=0 if active else 1,
-                border_color=("#dededb", "#3a3a3a"),
-                hover_color=("#1f75c5", "#367baa") if active else ("#eeeeeb", "#303030"),
-                command=lambda value=label: self._select_quality(value),
             )
             button.grid(row=index // 4, column=index % 4, sticky="ew", padx=4, pady=4)
             self.quality_buttons.append(button)
 
+    def _render_codec_buttons(self) -> None:
+        for button in self.codec_buttons:
+            button.destroy()
+        self.codec_buttons.clear()
+        source = self.video_groups.get(self.selected_quality, {})
+        if self.selected_codec not in source:
+            self.selected_codec = next(iter(source), "")
+        for index, label in enumerate(source):
+            active = label == self.selected_codec
+            button = self._choice_button(
+                self.codec_frame,
+                label,
+                active,
+                lambda value=label: self._select_codec(value),
+                height=38,
+            )
+            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=4, pady=4)
+            self.codec_buttons.append(button)
+
+    def _choice_button(
+        self,
+        parent: ctk.CTkFrame,
+        text: str,
+        active: bool,
+        command: Any,
+        height: int,
+    ) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            height=height,
+            corner_radius=10,
+            fg_color=("#2783de", "#3b8ed0") if active else ("#ffffff", "#242424"),
+            text_color="#ffffff" if active else ("#333333", "#eeeeee"),
+            border_width=0 if active else 1,
+            border_color=("#dededb", "#3a3a3a"),
+            hover_color=("#1f75c5", "#367baa") if active else ("#eeeeeb", "#303030"),
+            command=command,
+        )
+
     def _select_quality(self, label: str) -> None:
         if self.mode_var.get() == "Видео":
-            self.selected_video = label
-            self._render_quality_buttons(self.video_formats, label)
+            self.selected_quality = label
+            self.selected_codec = next(iter(self.video_groups.get(label, {})), "")
+            self._render_quality_buttons()
+            self._render_codec_buttons()
         else:
             self.selected_audio = label
-            self._render_quality_buttons(self.audio_formats, label)
+            self._render_quality_buttons()
+
+    def _select_codec(self, label: str) -> None:
+        self.selected_codec = label
+        self._render_codec_buttons()
 
     def _mode_changed(self, mode: str) -> None:
         if not self.revealed:
             return
         if mode == "Видео":
             self.audio_options.grid_remove()
+            self.codec_section.grid(row=3, column=0, sticky="ew", padx=34, pady=(13, 0))
             self.separate_check.grid()
-            self._render_quality_buttons(self.video_formats, self.selected_video)
+            self.download_button.configure(text="Скачать видео с аудио")
         else:
+            self.codec_section.grid_remove()
             self.separate_check.grid_remove()
-            self.audio_options.grid(row=3, column=0, sticky="ew", padx=34, pady=(14, 0))
-            self._render_quality_buttons(self.audio_formats, self.selected_audio)
+            self.audio_options.grid(row=3, column=0, sticky="ew", padx=34, pady=(13, 0))
+            self.download_button.configure(text="Скачать аудио")
+        self._render_quality_buttons()
+        if mode == "Видео":
+            self._render_codec_buttons()
 
     def _reveal_content(self) -> None:
         self.loading.stop()
         self.loading.grid_remove()
         self.content.grid(row=1, column=0, sticky="nsew")
         self.revealed = True
-        self.geometry("820x700")
-        self.minsize(700, 630)
+        self.geometry("840x790")
+        self.minsize(720, 690)
 
     def _hide_content(self) -> None:
         self.content.grid_remove()
         self.revealed = False
-        self.geometry("760x170")
-        self.minsize(620, 150)
+        self.geometry("760x210")
+        self.minsize(620, 190)
 
     def _download(self) -> None:
         if self.process or self.analyzed_url != self.url_var.get().strip():
@@ -377,6 +513,13 @@ class App(ctk.CTk):
         executable = find_tool("yt-dlp")
         if not executable:
             messagebox.showerror(APP_NAME, "yt-dlp не найден рядом с программой.")
+            return
+        separate = self.separate_var.get() and self.mode_var.get() == "Видео"
+        if self.mode_var.get() == "Видео" and not separate and not find_tool("ffmpeg"):
+            messagebox.showerror(
+                APP_NAME,
+                "FFmpeg не найден. Без него невозможно объединить видео и аудио.",
+            )
             return
         folder = Path(self.output_var.get()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
@@ -386,7 +529,7 @@ class App(ctk.CTk):
         self.progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.download_button.grid_remove()
         self.cancel_button.grid(row=0, column=0, sticky="ew")
-        self._log("\nЗапуск загрузки…\n")
+        self._log("\nЗапуск загрузки:\n" + subprocess.list2cmdline(command) + "\n\n")
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -401,7 +544,9 @@ class App(ctk.CTk):
 
     def _download_command(self, executable: str, folder: Path) -> list[str]:
         separate = self.separate_var.get() and self.mode_var.get() == "Видео"
-        template = "%(title)s [%(format_id)s].%(ext)s" if separate else "%(title)s.%(ext)s"
+        template = "%(title)s [%(format_id)s].%(ext)s" if separate else "%(title)s [%(id)s].%(ext)s"
+        ffmpeg = find_tool("ffmpeg")
+        ffmpeg_location = str(Path(ffmpeg).parent) if ffmpeg else str(app_dir())
         command = [
             executable,
             self.analyzed_url,
@@ -409,22 +554,24 @@ class App(ctk.CTk):
             "--progress",
             "--windows-filenames",
             "--ffmpeg-location",
-            str(app_dir()),
+            ffmpeg_location,
             "--output",
             str(folder / template),
             "--yes-playlist" if self.playlist_var.get() else "--no-playlist",
         ]
         if self.mode_var.get() == "Видео":
-            item = self.video_formats.get(self.selected_video, {})
+            item = self.video_groups.get(self.selected_quality, {}).get(self.selected_codec, {})
             video_id = str(item.get("format_id") or "bestvideo")
             has_audio = str(item.get("acodec") or "none") != "none"
             if separate:
-                selector = f"{video_id},bestaudio" if not has_audio else f"{video_id},bestaudio"
+                selector = f"{video_id},bestaudio"
+            elif has_audio:
+                selector = video_id
             else:
-                selector = video_id if has_audio else f"{video_id}+bestaudio/best"
+                selector = f"{video_id}+bestaudio[ext=m4a]/{video_id}+bestaudio/{video_id}+best"
             command.extend(["--format", selector])
             if not separate:
-                command.extend(["--merge-output-format", "mp4"])
+                command.extend(["--merge-output-format", "mp4", "--remux-video", "mp4"])
         else:
             item = self.audio_formats.get(self.selected_audio, {})
             command.extend(["--format", str(item.get("format_id") or "bestaudio/best")])
@@ -467,11 +614,14 @@ class App(ctk.CTk):
                     self.download_button.grid()
                     if int(payload) == 0:
                         self.progress.set(1)
-                        self.status_var.set("Готово")
+                        if self.mode_var.get() == "Видео" and not self.separate_var.get():
+                            self.status_var.set("Готово · видео и аудио объединены")
+                        else:
+                            self.status_var.set("Готово")
                         self.open_button.grid(row=0, column=2, sticky="e")
                         self._log("Готово.\n")
                     else:
-                        self.status_var.set("Ошибка загрузки — откройте подробности")
+                        self.status_var.set("Ошибка — откройте подробности")
         except queue.Empty:
             pass
         self.after(100, self._poll)
@@ -490,12 +640,12 @@ class App(ctk.CTk):
         if self.log_open:
             self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
             self.content.grid_rowconfigure(8, weight=1)
-            self.geometry("820x850")
+            self.geometry("840x940")
             self.log_button.configure(text="Скрыть подробности")
         else:
             self.log.grid_remove()
             self.content.grid_rowconfigure(8, weight=0)
-            self.geometry("820x700")
+            self.geometry("840x790")
             self.log_button.configure(text="Подробности")
 
     def _log(self, text: str) -> None:

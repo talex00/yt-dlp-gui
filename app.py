@@ -60,6 +60,27 @@ def duration(value: object) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
+def format_size(item: dict[str, Any], media_duration: float) -> float:
+    exact = item.get("filesize") or item.get("filesize_approx")
+    if isinstance(exact, (int, float)) and exact > 0:
+        return float(exact)
+    bitrate = item.get("tbr") or item.get("vbr") or item.get("abr")
+    if isinstance(bitrate, (int, float)) and bitrate > 0 and media_duration > 0:
+        return float(bitrate) * 1000 * media_duration / 8
+    return 0.0
+
+
+def human_size(size: float) -> str:
+    if size <= 0:
+        return "размер неизвестен"
+    value = size
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"≈ {value:.1f} {unit}"
+        value /= 1024
+    return "размер неизвестен"
+
+
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -72,6 +93,8 @@ class App(ctk.CTk):
         self.process: subprocess.Popen[str] | None = None
         self.analysis_timer: str | None = None
         self.analyzed_url = ""
+        self.media_duration = 0.0
+        self.merge_audio_size = 0.0
 
         self.video_groups: dict[str, dict[str, dict[str, Any]]] = {}
         self.audio_formats: dict[str, dict[str, Any]] = {}
@@ -92,6 +115,7 @@ class App(ctk.CTk):
         self.status_var = ctk.StringVar(value="")
         self.title_var = ctk.StringVar(value="")
         self.meta_var = ctk.StringVar(value="")
+        self.size_var = ctk.StringVar(value="")
 
         self._build()
         self.after(100, self._poll)
@@ -175,6 +199,13 @@ class App(ctk.CTk):
         self.codec_frame.grid(row=1, column=0, sticky="ew")
         for column in range(4):
             self.codec_frame.grid_columnconfigure(column, weight=1, uniform="codec")
+        ctk.CTkLabel(
+            self.codec_section,
+            textvariable=self.size_var,
+            anchor="w",
+            text_color=("#747474", "#a5a5a5"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=2, column=0, sticky="ew", pady=(7, 0))
 
         self.audio_options = ctk.CTkFrame(self.content, fg_color="transparent")
         self.audio_options.grid_columnconfigure(0, weight=1)
@@ -201,6 +232,7 @@ class App(ctk.CTk):
             variable=self.separate_var,
             checkbox_width=20,
             checkbox_height=20,
+            command=self._update_size_summary,
         )
         self.separate_check.grid(row=0, column=0, sticky="w")
         self.playlist_check = ctk.CTkCheckBox(
@@ -339,6 +371,7 @@ class App(ctk.CTk):
         if url != self.url_var.get().strip():
             return
         self.analyzed_url = url
+        self.media_duration = float(data.get("duration") or 0)
         self.title_var.set(str(data.get("title") or "Видео"))
         author = str(data.get("channel") or data.get("uploader") or "")
         length = duration(data.get("duration"))
@@ -361,13 +394,21 @@ class App(ctk.CTk):
             elif vcodec == "none" and acodec != "none":
                 audio_candidates.append(item)
 
+        preferred_audio = [item for item in audio_candidates if str(item.get("ext") or "").lower() == "m4a"]
+        merge_audio = max(
+            preferred_audio or audio_candidates,
+            key=lambda item: float(item.get("abr") or item.get("tbr") or 0),
+            default={},
+        )
+        self.merge_audio_size = format_size(merge_audio, self.media_duration)
+
         grouped: dict[tuple[int, int], dict[str, dict[str, Any]]] = {}
         for item in video_candidates:
             height = int(item.get("height") or 0)
             fps = int(item.get("fps") or 0)
             quality_key = (height, fps)
-            codec_label = f"{codec(item.get('vcodec'))} · {str(item.get('ext') or '?').upper()}"
-            previous = grouped.setdefault(quality_key, {}).get(codec_label)
+            codec_key = f"{codec(item.get('vcodec'))} · {str(item.get('ext') or '?').upper()}"
+            previous = grouped.setdefault(quality_key, {}).get(codec_key)
             score = (
                 str(item.get("acodec") or "none") == "none",
                 float(item.get("tbr") or 0),
@@ -377,12 +418,18 @@ class App(ctk.CTk):
                 float(previous.get("tbr") or 0),
             )
             if score > previous_score:
-                grouped[quality_key][codec_label] = item
+                grouped[quality_key][codec_key] = item
 
         self.video_groups.clear()
         for (height, fps), codecs in sorted(grouped.items(), reverse=True)[:8]:
             quality_label = f"{height}p\n{fps} FPS" if fps else f"{height}p"
-            self.video_groups[quality_label] = codecs
+            displayed_codecs: dict[str, dict[str, Any]] = {}
+            for codec_label, item in codecs.items():
+                video_size = format_size(item, self.media_duration)
+                has_audio = str(item.get("acodec") or "none") != "none"
+                total_size = video_size if has_audio else video_size + self.merge_audio_size
+                displayed_codecs[f"{codec_label}\n{human_size(total_size)}"] = item
+            self.video_groups[quality_label] = displayed_codecs
 
         audios = sorted(
             audio_candidates,
@@ -395,7 +442,8 @@ class App(ctk.CTk):
         self.audio_formats.clear()
         for item in audios:
             abr = int(float(item.get("abr") or item.get("tbr") or 0))
-            label = f"{abr or '?'} кбит/с\n{codec(item.get('acodec'))} · {str(item.get('ext') or '').upper()}"
+            size = human_size(format_size(item, self.media_duration))
+            label = f"{abr or '?'} кбит/с\n{codec(item.get('acodec'))} · {str(item.get('ext') or '').upper()} · {size}"
             if label not in self.audio_formats:
                 self.audio_formats[label] = item
 
@@ -403,6 +451,7 @@ class App(ctk.CTk):
         codecs = self.video_groups.get(self.selected_quality, {})
         self.selected_codec = next(iter(codecs), "")
         self.selected_audio = next(iter(self.audio_formats), "")
+        self._update_size_summary()
 
     def _render_quality_buttons(self) -> None:
         for button in self.quality_buttons:
@@ -436,10 +485,11 @@ class App(ctk.CTk):
                 label,
                 active,
                 lambda value=label: self._select_codec(value),
-                height=38,
+                height=54,
             )
             button.grid(row=index // 4, column=index % 4, sticky="ew", padx=4, pady=4)
             self.codec_buttons.append(button)
+        self._update_size_summary()
 
     def _choice_button(
         self,
@@ -476,6 +526,17 @@ class App(ctk.CTk):
         self.selected_codec = label
         self._render_codec_buttons()
 
+    def _update_size_summary(self) -> None:
+        item = self.video_groups.get(self.selected_quality, {}).get(self.selected_codec, {})
+        video_size = format_size(item, self.media_duration)
+        has_audio = str(item.get("acodec") or "none") != "none"
+        if has_audio:
+            self.size_var.set(f"Примерный размер готового файла: {human_size(video_size)}")
+        else:
+            total = video_size + self.merge_audio_size
+            suffix = "суммарно для двух файлов" if self.separate_var.get() else "после объединения с аудио"
+            self.size_var.set(f"Примерный размер: {human_size(total)} · {suffix}")
+
     def _mode_changed(self, mode: str) -> None:
         if not self.revealed:
             return
@@ -498,8 +559,8 @@ class App(ctk.CTk):
         self.loading.grid_remove()
         self.content.grid(row=1, column=0, sticky="nsew")
         self.revealed = True
-        self.geometry("840x790")
-        self.minsize(720, 690)
+        self.geometry("840x820")
+        self.minsize(720, 720)
 
     def _hide_content(self) -> None:
         self.content.grid_remove()
@@ -640,12 +701,12 @@ class App(ctk.CTk):
         if self.log_open:
             self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
             self.content.grid_rowconfigure(8, weight=1)
-            self.geometry("840x940")
+            self.geometry("840x970")
             self.log_button.configure(text="Скрыть подробности")
         else:
             self.log.grid_remove()
             self.content.grid_rowconfigure(8, weight=0)
-            self.geometry("840x790")
+            self.geometry("840x820")
             self.log_button.configure(text="Подробности")
 
     def _log(self, text: str) -> None:

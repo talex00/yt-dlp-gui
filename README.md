@@ -14,13 +14,28 @@
 - современный светлый/тёмный интерфейс на CustomTkinter;
 - сохранение настроек между запусками.
 
-## Требования
+## Готовая версия для Windows
+
+Python устанавливать не требуется.
+
+1. Откройте вкладку **Actions** в репозитории.
+2. Выберите успешную сборку **Build Windows EXE**.
+3. В разделе **Artifacts** скачайте `yt-dlp-gui-windows-portable`.
+4. Распакуйте архив и запустите `yt-dlp-gui.exe`.
+
+В архив уже входят `yt-dlp.exe`, `ffmpeg.exe` и `ffprobe.exe`. Все четыре EXE-файла должны оставаться в одной папке.
+
+Сборка автоматически запускается после изменений программы. Её также можно запустить вручную через **Actions → Build Windows EXE → Run workflow**.
+
+## Запуск из исходного кода
+
+### Требования
 
 - Python 3.9 или новее;
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp/releases/latest);
 - [FFmpeg](https://ffmpeg.org/download.html) — для объединения потоков и конвертации аудио.
 
-## Установка
+### Установка
 
 ```bash
 git clone https://github.com/talex00/yt-dlp-gui.git
@@ -32,7 +47,7 @@ python -m pip install -r requirements.txt
 
 Для обработки медиа `ffmpeg` и `ffprobe` должны быть доступны через `PATH` или находиться рядом с `yt-dlp.exe`.
 
-## Запуск
+### Запуск
 
 ```bash
 python app.py
@@ -45,14 +60,22 @@ python app.py
 
 Настройки сохраняются в `%APPDATA%\\yt-dlp-gui\\settings.json` на Windows.
 
-## Сборка EXE
+## Локальная сборка EXE
+
+На компьютере с установленным Python запустите:
+
+```bat
+build-windows.bat
+```
+
+Или выполните вручную:
 
 ```bash
 python -m pip install pyinstaller
 pyinstaller --noconsole --onefile --name yt-dlp-gui --collect-all customtkinter app.py
 ```
 
-Готовый файл появится в папке `dist`. Положите `yt-dlp.exe` рядом с ним.
+Готовый GUI-файл появится в папке `dist`.
 
 ## Лицензия
 

@@ -27,28 +27,50 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build application
+      - name: Install build dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install customtkinter pyinstaller
-          pyinstaller --noconfirm --clean --onefile --windowed `
-            --name yt-dlp-gui --collect-all customtkinter app.py
 
-      - name: Add yt-dlp and FFmpeg
+      - name: Download embedded yt-dlp and FFmpeg
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Path "embedded" -Force | Out-Null
           Invoke-WebRequest `
             -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
-            -OutFile "dist/yt-dlp.exe"
+            -OutFile "embedded/yt-dlp.exe"
           Invoke-WebRequest `
             -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
             -OutFile "ffmpeg.zip"
           Expand-Archive "ffmpeg.zip" "ffmpeg"
           $bin = Get-ChildItem "ffmpeg" -Directory | Select-Object -First 1
-          Copy-Item "$($bin.FullName)/bin/ffmpeg.exe" "dist/ffmpeg.exe"
-          Copy-Item "$($bin.FullName)/bin/ffprobe.exe" "dist/ffprobe.exe"
-          Compress-Archive -Path "dist/*" -DestinationPath "yt-dlp-gui-windows.zip"
+          Copy-Item "$($bin.FullName)/bin/ffmpeg.exe" "embedded/ffmpeg.exe"
+
+      - name: Create runtime hook
+        shell: pwsh
+        run: |
+          @'
+          import os
+          import sys
+
+          bundle_dir = getattr(sys, "_MEIPASS", "")
+          if bundle_dir:
+              os.environ["PATH"] = bundle_dir + os.pathsep + os.environ.get("PATH", "")
+          '@ | Set-Content -Path "embedded_tools_path.py" -Encoding UTF8
+
+      - name: Build single portable EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name yt-dlp-gui `
+            --collect-all customtkinter `
+            --runtime-hook "embedded_tools_path.py" `
+            --add-binary "embedded/yt-dlp.exe;." `
+            --add-binary "embedded/ffmpeg.exe;." `
+            app.py
+          $size = [math]::Round((Get-Item "dist/yt-dlp-gui.exe").Length / 1MB, 1)
+          "Single EXE size: $size MB" | Write-Host
 
       - name: Publish GitHub release
         shell: pwsh
@@ -56,8 +78,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-${{ github.run_number }}"
-          gh release create $tag "yt-dlp-gui-windows.zip" `
+          gh release create $tag "dist/yt-dlp-gui.exe#yt-dlp-gui.exe" `
             --target "${{ github.sha }}" `
             --title "yt-dlp GUI — build ${{ github.run_number }}" `
-            --notes "Готовая portable-сборка для Windows. Распакуйте архив и запустите yt-dlp-gui.exe. Python не требуется." `
+            --notes "Один готовый EXE для Windows. yt-dlp и FFmpeg уже встроены внутрь; Python, распаковка и дополнительные файлы не требуются." `
             --latest

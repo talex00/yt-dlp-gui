@@ -21,7 +21,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/your-username/yt-dlp-gui.git
+   git clone https://github.com/talex00/yt-dlp-gui.git
    cd "yt-dlp gui"
    ```
 

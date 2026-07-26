@@ -15,529 +15,514 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 APP_NAME = "yt-dlp GUI"
-SETTINGS_DIR = Path(os.getenv("APPDATA", Path.home())) / "yt-dlp-gui"
-SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 PROGRESS_RE = re.compile(r"\[download\]\s+([\d.]+)%")
-AUTO_VIDEO = "Лучшее доступное качество (авто)"
-AUTO_AUDIO = "Лучший аудиопоток (авто)"
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
 
-def app_directory() -> Path:
+def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-def default_download_directory() -> Path:
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+def downloads_dir() -> Path:
+    path = Path.home() / "Downloads"
+    return path if path.exists() else Path.home()
 
 
-def human_size(value: object) -> str:
-    if not isinstance(value, (int, float)) or value <= 0:
-        return "размер неизвестен"
-    size = float(value)
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if size < 1024 or unit == "ГБ":
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return "размер неизвестен"
+def find_tool(name: str) -> str | None:
+    executable = f"{name}.exe" if os.name == "nt" else name
+    local = app_dir() / executable
+    return str(local) if local.is_file() else shutil.which(name)
 
 
-def human_duration(value: object) -> str:
+def codec(value: object) -> str:
+    raw = str(value or "?").split(".", 1)[0].lower()
+    return {"avc1": "H.264", "h264": "H.264", "av01": "AV1", "vp09": "VP9", "mp4a": "AAC"}.get(raw, raw.upper())
+
+
+def duration(value: object) -> str:
     if not isinstance(value, (int, float)):
         return ""
-    seconds = int(value)
-    hours, seconds = divmod(seconds, 3600)
-    minutes, seconds = divmod(seconds, 60)
+    total = int(value)
+    hours, total = divmod(total, 3600)
+    minutes, seconds = divmod(total, 60)
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
-def codec_name(value: object) -> str:
-    text = str(value or "?").split(".", 1)[0]
-    aliases = {"avc1": "H.264", "h264": "H.264", "av01": "AV1", "vp09": "VP9", "mp4a": "AAC"}
-    return aliases.get(text.lower(), text.upper())
-
-
-class YtDlpGui(ctk.CTk):
+class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1100x820")
-        self.minsize(900, 720)
+        self.geometry("760x170")
+        self.minsize(620, 150)
+        self.configure(fg_color=("#f6f6f4", "#181818"))
 
-        self.process: subprocess.Popen[str] | None = None
-        self.current_action: str | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.settings = self._load_settings()
-        self.video_formats: dict[str, tuple[str, bool]] = {}
-        self.audio_formats: dict[str, str] = {}
+        self.process: subprocess.Popen[str] | None = None
+        self.analysis_timer: str | None = None
+        self.analyzed_url = ""
+        self.video_formats: dict[str, dict[str, Any]] = {}
+        self.audio_formats: dict[str, dict[str, Any]] = {}
+        self.quality_buttons: list[ctk.CTkButton] = []
+        self.selected_video = ""
+        self.selected_audio = ""
+        self.revealed = False
+        self.log_open = False
 
-        detected_executable = self._detect_yt_dlp()
         self.url_var = ctk.StringVar()
-        self.output_var = ctk.StringVar(value=str(self.settings.get("output_dir", default_download_directory())))
-        self.executable_var = ctk.StringVar(value=str(self.settings.get("yt_dlp_path", detected_executable)))
-        self.mode_var = ctk.StringVar(value=str(self.settings.get("mode", "Видео")))
-        self.video_format_var = ctk.StringVar(value=AUTO_VIDEO)
-        self.audio_source_var = ctk.StringVar(value=AUTO_AUDIO)
-        self.audio_output_var = ctk.StringVar(value=str(self.settings.get("audio_output", "mp3")))
-        self.playlist_var = ctk.BooleanVar(value=bool(self.settings.get("playlist", False)))
-        self.overwrite_var = ctk.BooleanVar(value=False)
-        self.status_var = ctk.StringVar(value="Готово к работе")
-        self.media_title_var = ctk.StringVar(value="Вставьте ссылку и нажмите «Анализировать»")
-        self.media_details_var = ctk.StringVar(value="Будут показаны реальные форматы, разрешения, FPS и битрейты")
+        self.mode_var = ctk.StringVar(value="Видео")
+        self.output_var = ctk.StringVar(value=str(downloads_dir()))
+        self.audio_output_var = ctk.StringVar(value="Оригинал")
+        self.playlist_var = ctk.BooleanVar(value=False)
+        self.separate_var = ctk.BooleanVar(value=False)
+        self.status_var = ctk.StringVar(value="")
+        self.title_var = ctk.StringVar(value="")
+        self.meta_var = ctk.StringVar(value="")
 
-        self._build_ui()
-        self._update_mode_controls(self.mode_var.get())
-        self.after(100, self._poll_events)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build()
+        self.after(100, self._poll)
+        self.protocol("WM_DELETE_WINDOW", self._close)
 
-    def _build_ui(self) -> None:
+    def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=32, pady=(24, 16))
-        header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="yt-dlp GUI", font=ctk.CTkFont(size=28, weight="bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            header,
-            text="Видео и аудио — с понятным выбором реального качества",
-            text_color=("#666666", "#a9a9a9"),
-            font=ctk.CTkFont(size=14),
-        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
-        self.theme_button = ctk.CTkButton(
-            header, text="◐  Тема", width=96, fg_color="transparent", border_width=1,
-            text_color=("#333333", "#eeeeee"), command=self._toggle_theme,
-        )
-        self.theme_button.grid(row=0, column=1, rowspan=2, sticky="e")
-
-        url_card = ctk.CTkFrame(self, corner_radius=14)
-        url_card.grid(row=1, column=0, sticky="ew", padx=32, pady=(0, 14))
-        url_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(url_card, text="Ссылка на видео или плейлист", font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(16, 7)
-        )
+        search = ctk.CTkFrame(self, fg_color="transparent")
+        search.grid(row=0, column=0, sticky="ew", padx=34, pady=34)
+        search.grid_columnconfigure(0, weight=1)
         self.url_entry = ctk.CTkEntry(
-            url_card, textvariable=self.url_var, height=42,
-            placeholder_text="https://www.youtube.com/watch?v=…",
+            search,
+            textvariable=self.url_var,
+            height=54,
+            corner_radius=14,
+            border_width=1,
+            placeholder_text="Вставьте ссылку на видео",
+            font=ctk.CTkFont(size=16),
         )
-        self.url_entry.grid(row=1, column=0, sticky="ew", padx=(20, 10), pady=(0, 16))
-        self.url_entry.bind("<Return>", lambda _event: self._start_analysis())
-        self.analyze_button = ctk.CTkButton(
-            url_card, text="Анализировать", width=150, height=42, command=self._start_analysis,
-        )
-        self.analyze_button.grid(row=1, column=1, padx=(0, 20), pady=(0, 16))
-
-        content = ctk.CTkFrame(self, fg_color="transparent")
-        content.grid(row=2, column=0, sticky="ew", padx=32)
-        content.grid_columnconfigure(0, weight=3, uniform="cards")
-        content.grid_columnconfigure(1, weight=2, uniform="cards")
-
-        media_card = ctk.CTkFrame(content, corner_radius=14)
-        media_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        media_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(media_card, textvariable=self.media_title_var, anchor="w", justify="left", wraplength=570,
-                     font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="ew", padx=20, pady=(17, 3))
-        ctk.CTkLabel(media_card, textvariable=self.media_details_var, anchor="w", justify="left",
-                     text_color=("#666666", "#a9a9a9")).grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 14))
-
-        self.mode_switch = ctk.CTkSegmentedButton(
-            media_card, values=["Видео", "Аудио"], variable=self.mode_var,
-            command=self._update_mode_controls, height=36,
-        )
-        self.mode_switch.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 14))
-
-        self.video_panel = ctk.CTkFrame(media_card, fg_color="transparent")
-        self.video_panel.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 18))
-        self.video_panel.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(self.video_panel, text="Доступное качество", anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        self.video_menu = ctk.CTkOptionMenu(
-            self.video_panel, variable=self.video_format_var, values=[AUTO_VIDEO],
-            height=38, dynamic_resizing=False,
-        )
-        self.video_menu.grid(row=1, column=0, sticky="ew")
-
-        self.audio_panel = ctk.CTkFrame(media_card, fg_color="transparent")
-        self.audio_panel.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 18))
-        self.audio_panel.grid_columnconfigure(0, weight=2)
-        self.audio_panel.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(self.audio_panel, text="Исходный аудиопоток", anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(self.audio_panel, text="Сохранить как", anchor="w").grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 6))
-        self.audio_source_menu = ctk.CTkOptionMenu(
-            self.audio_panel, variable=self.audio_source_var, values=[AUTO_AUDIO],
-            height=38, dynamic_resizing=False,
-        )
-        self.audio_source_menu.grid(row=1, column=0, sticky="ew")
-        self.audio_output_menu = ctk.CTkOptionMenu(
-            self.audio_panel, variable=self.audio_output_var,
-            values=["Оригинал", "mp3", "m4a", "opus", "wav", "flac"], height=38,
-        )
-        self.audio_output_menu.grid(row=1, column=1, sticky="ew", padx=(10, 0))
-
-        settings_card = ctk.CTkFrame(content, corner_radius=14)
-        settings_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        settings_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(settings_card, text="Сохранение", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=20, pady=(17, 12)
-        )
-        self.output_entry = ctk.CTkEntry(settings_card, textvariable=self.output_var, height=38)
-        self.output_entry.grid(row=1, column=0, sticky="ew", padx=(20, 8))
-        ctk.CTkButton(settings_card, text="…", width=42, height=38, command=self._choose_output).grid(
-            row=1, column=1, padx=(0, 20)
-        )
-        ctk.CTkLabel(settings_card, text="Путь к yt-dlp", anchor="w").grid(
-            row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=(13, 6)
-        )
-        self.executable_entry = ctk.CTkEntry(settings_card, textvariable=self.executable_var, height=38)
-        self.executable_entry.grid(row=3, column=0, sticky="ew", padx=(20, 8))
-        ctk.CTkButton(settings_card, text="…", width=42, height=38, command=self._choose_executable).grid(
-            row=3, column=1, padx=(0, 20)
-        )
-        self.playlist_check = ctk.CTkCheckBox(settings_card, text="Скачать плейлист целиком", variable=self.playlist_var)
-        self.playlist_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(15, 8))
-        self.overwrite_check = ctk.CTkCheckBox(settings_card, text="Перезаписывать файлы", variable=self.overwrite_var)
-        self.overwrite_check.grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 17))
-
-        action = ctk.CTkFrame(self, fg_color="transparent")
-        action.grid(row=3, column=0, sticky="ew", padx=32, pady=14)
-        action.grid_columnconfigure(1, weight=1)
-        self.download_button = ctk.CTkButton(
-            action, text="Скачать", width=150, height=42, font=ctk.CTkFont(weight="bold"), command=self._start_download,
-        )
-        self.download_button.grid(row=0, column=0, rowspan=2, sticky="w")
-        self.progress = ctk.CTkProgressBar(action, height=10)
-        self.progress.grid(row=0, column=1, sticky="ew", padx=16)
-        self.progress.set(0)
-        ctk.CTkLabel(action, textvariable=self.status_var, anchor="w", text_color=("#666666", "#a9a9a9")).grid(
-            row=1, column=1, sticky="ew", padx=16, pady=(4, 0)
-        )
-        self.cancel_button = ctk.CTkButton(
-            action, text="Отмена", width=100, height=42, fg_color="transparent", border_width=1,
-            text_color=("#333333", "#eeeeee"), command=self._cancel_operation, state="disabled",
-        )
-        self.cancel_button.grid(row=0, column=2, rowspan=2)
-        ctk.CTkButton(
-            action, text="Открыть папку", width=125, height=42, fg_color="transparent", border_width=1,
-            text_color=("#333333", "#eeeeee"), command=self._open_output,
-        ).grid(row=0, column=3, rowspan=2, padx=(10, 0))
-
-        log_card = ctk.CTkFrame(self, corner_radius=14)
-        log_card.grid(row=4, column=0, sticky="nsew", padx=32, pady=(0, 26))
-        log_card.grid_columnconfigure(0, weight=1)
-        log_card.grid_rowconfigure(1, weight=1, minsize=210)
-        ctk.CTkLabel(log_card, text="Журнал", font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=18, pady=(13, 7)
-        )
-        ctk.CTkButton(
-            log_card, text="Очистить", width=80, height=28, fg_color="transparent",
-            text_color=("#555555", "#bbbbbb"), command=self._clear_log,
-        ).grid(row=0, column=1, sticky="e", padx=12, pady=(10, 5))
-        self.log = ctk.CTkTextbox(log_card, wrap="word", font=("Consolas", 12), corner_radius=8)
-        self.log.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=12, pady=(0, 12))
-        self.log.configure(state="disabled")
+        self.url_entry.grid(row=0, column=0, sticky="ew")
+        self.url_entry.bind("<KeyRelease>", self._url_changed)
+        self.url_entry.bind("<<Paste>>", lambda _event: self.after(50, self._url_changed))
+        self.url_entry.bind("<Return>", lambda _event: self._analyze_now())
         self.url_entry.focus_set()
 
-    def _toggle_theme(self) -> None:
-        current = ctk.get_appearance_mode()
-        ctk.set_appearance_mode("Light" if current == "Dark" else "Dark")
+        self.loading = ctk.CTkProgressBar(search, width=70, height=3, mode="indeterminate")
 
-    def _detect_yt_dlp(self) -> str:
-        for candidate in (app_directory() / "yt-dlp.exe", app_directory() / "yt-dlp"):
-            if candidate.is_file():
-                return str(candidate)
-        return shutil.which("yt-dlp") or "yt-dlp.exe"
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.grid_columnconfigure(0, weight=1)
 
-    def _load_settings(self) -> dict[str, object]:
-        try:
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return {}
+        info = ctk.CTkFrame(self.content, fg_color="transparent")
+        info.grid(row=0, column=0, sticky="ew", padx=34)
+        info.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            info, textvariable=self.title_var, anchor="w", justify="left",
+            font=ctk.CTkFont(size=21, weight="bold"), wraplength=690,
+        ).grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(
+            info, textvariable=self.meta_var, anchor="w",
+            text_color=("#747474", "#a5a5a5"), font=ctk.CTkFont(size=13),
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
-    def _save_settings(self) -> None:
-        data = {
-            "output_dir": self.output_var.get().strip(),
-            "yt_dlp_path": self.executable_var.get().strip(),
-            "mode": self.mode_var.get(),
-            "audio_output": self.audio_output_var.get(),
-            "playlist": self.playlist_var.get(),
-        }
-        try:
-            SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-            SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-
-    def _resolve_executable(self) -> str | None:
-        value = self.executable_var.get().strip()
-        if Path(value).is_file():
-            return value
-        return shutil.which(value)
-
-    def _validate_url_and_executable(self) -> tuple[str, str] | None:
-        url = self.url_var.get().strip()
-        if not url.startswith(("http://", "https://")):
-            messagebox.showwarning(APP_NAME, "Введите корректную ссылку на видео.")
-            self.url_entry.focus_set()
-            return None
-        executable = self._resolve_executable()
-        if not executable:
-            messagebox.showerror(APP_NAME, "Файл yt-dlp не найден. Укажите путь к yt-dlp.exe.")
-            return None
-        return url, executable
-
-    def _start_analysis(self) -> None:
-        if self.process:
-            return
-        validated = self._validate_url_and_executable()
-        if not validated:
-            return
-        url, executable = validated
-        self._set_busy(True, "analysis")
-        self.status_var.set("Получаем сведения о видео…")
-        self.media_title_var.set("Анализ ссылки…")
-        self.media_details_var.set("yt-dlp запрашивает список доступных потоков")
-        self._append_log(f"\nАнализ: {url}\n")
-        threading.Thread(target=self._run_analysis, args=(executable, url), daemon=True).start()
-
-    def _run_analysis(self, executable: str, url: str) -> None:
-        try:
-            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            self.process = subprocess.Popen(
-                [executable, "--dump-single-json", "--no-playlist", "--no-warnings", url],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                encoding="utf-8", errors="replace", creationflags=flags,
-            )
-            stdout, stderr = self.process.communicate()
-            code = self.process.returncode
-            if code != 0:
-                self.events.put(("analysis_error", stderr.strip() or f"yt-dlp завершился с кодом {code}"))
-            else:
-                self.events.put(("analysis_result", json.loads(stdout)))
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.events.put(("analysis_error", str(error)))
-        finally:
-            self.process = None
-
-    def _apply_analysis(self, data: dict[str, Any]) -> None:
-        if data.get("_type") == "playlist" and data.get("entries"):
-            data = next((entry for entry in data["entries"] if entry), data)
-        title = str(data.get("title") or "Без названия")
-        uploader = str(data.get("uploader") or data.get("channel") or "Автор неизвестен")
-        duration = human_duration(data.get("duration"))
-        self.media_title_var.set(title)
-        self.media_details_var.set(" · ".join(part for part in (uploader, duration) if part))
-
-        videos: list[tuple[tuple[int, float, float], str, str, bool]] = []
-        audios: list[tuple[tuple[float, float], str, str]] = []
-        for fmt in data.get("formats") or []:
-            format_id = str(fmt.get("format_id") or "")
-            if not format_id:
-                continue
-            vcodec = str(fmt.get("vcodec") or "none")
-            acodec = str(fmt.get("acodec") or "none")
-            extension = str(fmt.get("ext") or "?").upper()
-            size = human_size(fmt.get("filesize") or fmt.get("filesize_approx"))
-            if vcodec != "none" and fmt.get("height"):
-                height = int(fmt.get("height") or 0)
-                fps = float(fmt.get("fps") or 0)
-                bitrate = float(fmt.get("tbr") or 0)
-                audio_note = "с аудио" if acodec != "none" else "+ лучшее аудио"
-                fps_text = f" · {fps:g} FPS" if fps else ""
-                label = f"{height}p{fps_text} · {codec_name(vcodec)} · {extension} · {audio_note} · {size}  [{format_id}]"
-                videos.append(((height, fps, bitrate), label, format_id, acodec != "none"))
-            elif vcodec == "none" and acodec != "none":
-                abr = float(fmt.get("abr") or fmt.get("tbr") or 0)
-                bitrate_text = f"{abr:.0f} кбит/с" if abr else "битрейт неизвестен"
-                sample_rate = fmt.get("asr")
-                sample_text = f" · {int(sample_rate) / 1000:g} кГц" if isinstance(sample_rate, (int, float)) else ""
-                label = f"{codec_name(acodec)} · {bitrate_text}{sample_text} · {extension} · {size}  [{format_id}]"
-                audios.append(((abr, float(fmt.get("filesize") or 0)), label, format_id))
-
-        videos.sort(key=lambda item: item[0], reverse=True)
-        audios.sort(key=lambda item: item[0], reverse=True)
-        self.video_formats = {label: (format_id, has_audio) for _, label, format_id, has_audio in videos}
-        self.audio_formats = {label: format_id for _, label, format_id in audios}
-        video_values = [AUTO_VIDEO, *self.video_formats.keys()]
-        audio_values = [AUTO_AUDIO, *self.audio_formats.keys()]
-        self.video_menu.configure(values=video_values)
-        self.audio_source_menu.configure(values=audio_values)
-        self.video_format_var.set(video_values[1] if len(video_values) > 1 else AUTO_VIDEO)
-        self.audio_source_var.set(audio_values[1] if len(audio_values) > 1 else AUTO_AUDIO)
-        self.status_var.set(f"Найдено: {len(videos)} видеоформатов и {len(audios)} аудиоформатов")
-        self._append_log(f"Найдено видеоформатов: {len(videos)}, аудиоформатов: {len(audios)}.\n")
-
-    def _update_mode_controls(self, selected: str) -> None:
-        if selected == "Видео":
-            self.audio_panel.grid_remove()
-            self.video_panel.grid()
-        else:
-            self.video_panel.grid_remove()
-            self.audio_panel.grid()
-
-    def _choose_output(self) -> None:
-        selected = filedialog.askdirectory(title="Выберите папку", initialdir=self.output_var.get() or str(default_download_directory()))
-        if selected:
-            self.output_var.set(selected)
-
-    def _choose_executable(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Выберите yt-dlp", filetypes=(("yt-dlp", "yt-dlp.exe yt-dlp"), ("Все файлы", "*.*"))
+        self.mode = ctk.CTkSegmentedButton(
+            self.content, values=["Видео", "Аудио"], variable=self.mode_var,
+            command=self._mode_changed, height=38, corner_radius=10,
         )
-        if selected:
-            self.executable_var.set(selected)
+        self.mode.grid(row=1, column=0, sticky="ew", padx=34, pady=(22, 0))
 
-    def _build_download_command(self, executable: str, url: str, output_dir: Path) -> list[str]:
+        self.quality_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.quality_frame.grid(row=2, column=0, sticky="ew", padx=34, pady=(18, 0))
+        for column in range(4):
+            self.quality_frame.grid_columnconfigure(column, weight=1, uniform="quality")
+
+        self.audio_options = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.audio_options.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self.audio_options, text="Формат файла", anchor="w",
+            text_color=("#747474", "#a5a5a5"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.audio_output = ctk.CTkOptionMenu(
+            self.audio_options,
+            values=["Оригинал", "mp3", "m4a", "opus", "wav", "flac"],
+            variable=self.audio_output_var,
+            height=36,
+        )
+        self.audio_output.grid(row=1, column=0, sticky="ew")
+
+        options = ctk.CTkFrame(self.content, fg_color="transparent")
+        options.grid(row=4, column=0, sticky="ew", padx=34, pady=(20, 0))
+        options.grid_columnconfigure(1, weight=1)
+        self.separate_check = ctk.CTkCheckBox(
+            options, text="Скачать видео и аудио отдельно", variable=self.separate_var,
+            checkbox_width=20, checkbox_height=20,
+        )
+        self.separate_check.grid(row=0, column=0, sticky="w")
+        self.playlist_check = ctk.CTkCheckBox(
+            options, text="Скачать весь плейлист", variable=self.playlist_var,
+            checkbox_width=20, checkbox_height=20,
+        )
+        self.playlist_check.grid(row=0, column=1, sticky="e")
+
+        destination = ctk.CTkFrame(self.content, fg_color="transparent")
+        destination.grid(row=5, column=0, sticky="ew", padx=34, pady=(16, 0))
+        destination.grid_columnconfigure(0, weight=1)
+        self.folder_button = ctk.CTkButton(
+            destination, text=self._folder_label(), anchor="w", height=36,
+            fg_color="transparent", border_width=1,
+            text_color=("#555555", "#c7c7c7"), command=self._choose_folder,
+        )
+        self.folder_button.grid(row=0, column=0, sticky="ew")
+
+        actions = ctk.CTkFrame(self.content, fg_color="transparent")
+        actions.grid(row=6, column=0, sticky="ew", padx=34, pady=(20, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        self.download_button = ctk.CTkButton(
+            actions, text="Скачать", height=48, corner_radius=12,
+            font=ctk.CTkFont(size=15, weight="bold"), command=self._download,
+        )
+        self.download_button.grid(row=0, column=0, sticky="ew")
+        self.cancel_button = ctk.CTkButton(
+            actions, text="Отмена", width=90, height=48, corner_radius=12,
+            fg_color="transparent", border_width=1,
+            text_color=("#555555", "#d0d0d0"), command=self._cancel,
+        )
+        self.status = ctk.CTkLabel(
+            actions, textvariable=self.status_var, anchor="w",
+            text_color=("#747474", "#a5a5a5"),
+        )
+        self.status.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.progress = ctk.CTkProgressBar(actions, height=7)
+        self.progress.set(0)
+
+        footer = ctk.CTkFrame(self.content, fg_color="transparent")
+        footer.grid(row=7, column=0, sticky="ew", padx=34, pady=(10, 22))
+        footer.grid_columnconfigure(1, weight=1)
+        self.log_button = ctk.CTkButton(
+            footer, text="Подробности", width=100, height=28,
+            fg_color="transparent", text_color=("#666666", "#aaaaaa"),
+            hover_color=("#e9e9e6", "#252525"), command=self._toggle_log,
+        )
+        self.log_button.grid(row=0, column=0, sticky="w")
+        self.open_button = ctk.CTkButton(
+            footer, text="Открыть папку", width=110, height=28,
+            fg_color="transparent", text_color=("#666666", "#aaaaaa"),
+            hover_color=("#e9e9e6", "#252525"), command=self._open_folder,
+        )
+
+        self.log = ctk.CTkTextbox(
+            self.content, height=170, corner_radius=10, wrap="word", font=("Consolas", 11)
+        )
+        self.log.configure(state="disabled")
+
+    def _url_changed(self, _event: object = None) -> None:
+        if self.analysis_timer:
+            self.after_cancel(self.analysis_timer)
+        url = self.url_var.get().strip()
+        if url.startswith(("http://", "https://")):
+            self.analysis_timer = self.after(700, self._analyze_now)
+
+    def _analyze_now(self) -> None:
+        self.analysis_timer = None
+        url = self.url_var.get().strip()
+        if not url.startswith(("http://", "https://")) or self.process:
+            return
+        executable = find_tool("yt-dlp")
+        if not executable:
+            messagebox.showerror(APP_NAME, "yt-dlp не найден рядом с программой.")
+            return
+        self._hide_content()
+        self.loading.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        self.loading.start()
+        self.process = subprocess.Popen(
+            [executable, "--dump-single-json", "--no-playlist", "--no-warnings", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        threading.Thread(target=self._collect_analysis, args=(url,), daemon=True).start()
+
+    def _collect_analysis(self, url: str) -> None:
+        assert self.process is not None
+        stdout, stderr = self.process.communicate()
+        code = self.process.returncode
+        self.process = None
+        if code == 0:
+            try:
+                self.events.put(("analysis", (url, json.loads(stdout))))
+            except json.JSONDecodeError as error:
+                self.events.put(("error", str(error)))
+        else:
+            self.events.put(("error", stderr.strip() or f"yt-dlp: код {code}"))
+
+    def _apply_analysis(self, url: str, data: dict[str, Any]) -> None:
+        if url != self.url_var.get().strip():
+            return
+        self.analyzed_url = url
+        self.title_var.set(str(data.get("title") or "Видео"))
+        author = str(data.get("channel") or data.get("uploader") or "")
+        length = duration(data.get("duration"))
+        self.meta_var.set("  ·  ".join(value for value in (author, length) if value))
+        self._prepare_formats(data.get("formats") or [])
+        self._reveal_content()
+        self._mode_changed(self.mode_var.get())
+        self.status_var.set("Готово к скачиванию")
+
+    def _prepare_formats(self, formats: list[dict[str, Any]]) -> None:
+        video_candidates: list[dict[str, Any]] = []
+        audio_candidates: list[dict[str, Any]] = []
+        for item in formats:
+            if not item.get("format_id"):
+                continue
+            vcodec = str(item.get("vcodec") or "none")
+            acodec = str(item.get("acodec") or "none")
+            if vcodec != "none" and item.get("height"):
+                video_candidates.append(item)
+            elif vcodec == "none" and acodec != "none":
+                audio_candidates.append(item)
+
+        best_video: dict[tuple[int, int], dict[str, Any]] = {}
+        for item in video_candidates:
+            key = (int(item.get("height") or 0), int(item.get("fps") or 0))
+            old = best_video.get(key)
+            score = (str(item.get("acodec") or "none") == "none", float(item.get("tbr") or 0))
+            old_score = (-1, -1.0) if old is None else (
+                str(old.get("acodec") or "none") == "none", float(old.get("tbr") or 0)
+            )
+            if score > old_score:
+                best_video[key] = item
+
+        videos = sorted(best_video.values(), key=lambda x: (int(x.get("height") or 0), float(x.get("fps") or 0)), reverse=True)[:8]
+        audios = sorted(audio_candidates, key=lambda x: (float(x.get("abr") or x.get("tbr") or 0), float(x.get("filesize") or 0)), reverse=True)[:8]
+
+        self.video_formats.clear()
+        for item in videos:
+            height = int(item.get("height") or 0)
+            fps = int(item.get("fps") or 0)
+            detail = f"{fps} FPS · {codec(item.get('vcodec'))}" if fps else codec(item.get("vcodec"))
+            label = f"{height}p\n{detail}"
+            self.video_formats[label] = item
+
+        self.audio_formats.clear()
+        for item in audios:
+            abr = int(float(item.get("abr") or item.get("tbr") or 0))
+            label = f"{abr or '?'} кбит/с\n{codec(item.get('acodec'))} · {str(item.get('ext') or '').upper()}"
+            if label not in self.audio_formats:
+                self.audio_formats[label] = item
+
+        self.selected_video = next(iter(self.video_formats), "")
+        self.selected_audio = next(iter(self.audio_formats), "")
+
+    def _render_quality_buttons(self, source: dict[str, dict[str, Any]], selected: str) -> None:
+        for button in self.quality_buttons:
+            button.destroy()
+        self.quality_buttons.clear()
+        for index, label in enumerate(source):
+            active = label == selected
+            button = ctk.CTkButton(
+                self.quality_frame,
+                text=label,
+                height=58,
+                corner_radius=10,
+                fg_color=("#2783de", "#3b8ed0") if active else ("#ffffff", "#242424"),
+                text_color="#ffffff" if active else ("#333333", "#eeeeee"),
+                border_width=0 if active else 1,
+                border_color=("#dededb", "#3a3a3a"),
+                hover_color=("#1f75c5", "#367baa") if active else ("#eeeeeb", "#303030"),
+                command=lambda value=label: self._select_quality(value),
+            )
+            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=4, pady=4)
+            self.quality_buttons.append(button)
+
+    def _select_quality(self, label: str) -> None:
+        if self.mode_var.get() == "Видео":
+            self.selected_video = label
+            self._render_quality_buttons(self.video_formats, label)
+        else:
+            self.selected_audio = label
+            self._render_quality_buttons(self.audio_formats, label)
+
+    def _mode_changed(self, mode: str) -> None:
+        if not self.revealed:
+            return
+        if mode == "Видео":
+            self.audio_options.grid_remove()
+            self.separate_check.grid()
+            self._render_quality_buttons(self.video_formats, self.selected_video)
+        else:
+            self.separate_check.grid_remove()
+            self.audio_options.grid(row=3, column=0, sticky="ew", padx=34, pady=(14, 0))
+            self._render_quality_buttons(self.audio_formats, self.selected_audio)
+
+    def _reveal_content(self) -> None:
+        self.loading.stop()
+        self.loading.grid_remove()
+        self.content.grid(row=1, column=0, sticky="nsew")
+        self.revealed = True
+        self.geometry("820x700")
+        self.minsize(700, 630)
+
+    def _hide_content(self) -> None:
+        self.content.grid_remove()
+        self.revealed = False
+        self.geometry("760x170")
+        self.minsize(620, 150)
+
+    def _download(self) -> None:
+        if self.process or self.analyzed_url != self.url_var.get().strip():
+            return
+        executable = find_tool("yt-dlp")
+        if not executable:
+            messagebox.showerror(APP_NAME, "yt-dlp не найден рядом с программой.")
+            return
+        folder = Path(self.output_var.get()).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        command = self._download_command(executable, folder)
+        self.status_var.set("Подготовка…")
+        self.progress.set(0)
+        self.progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.download_button.grid_remove()
+        self.cancel_button.grid(row=0, column=0, sticky="ew")
+        self._log("\nЗапуск загрузки…\n")
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        threading.Thread(target=self._collect_download, daemon=True).start()
+
+    def _download_command(self, executable: str, folder: Path) -> list[str]:
+        separate = self.separate_var.get() and self.mode_var.get() == "Видео"
+        template = "%(title)s [%(format_id)s].%(ext)s" if separate else "%(title)s.%(ext)s"
         command = [
-            executable, url, "--newline", "--progress", "--windows-filenames",
-            "--output", str(output_dir / "%(title)s.%(ext)s"),
+            executable,
+            self.analyzed_url,
+            "--newline",
+            "--progress",
+            "--windows-filenames",
+            "--ffmpeg-location",
+            str(app_dir()),
+            "--output",
+            str(folder / template),
             "--yes-playlist" if self.playlist_var.get() else "--no-playlist",
-            "--force-overwrites" if self.overwrite_var.get() else "--no-overwrites",
         ]
         if self.mode_var.get() == "Видео":
-            selected = self.video_format_var.get()
-            if selected in self.video_formats:
-                format_id, has_audio = self.video_formats[selected]
-                selector = format_id if has_audio else f"{format_id}+bestaudio/best"
+            item = self.video_formats.get(self.selected_video, {})
+            video_id = str(item.get("format_id") or "bestvideo")
+            has_audio = str(item.get("acodec") or "none") != "none"
+            if separate:
+                selector = f"{video_id},bestaudio" if not has_audio else f"{video_id},bestaudio"
             else:
-                selector = "bestvideo*+bestaudio/best"
-            command.extend(["--format", selector, "--merge-output-format", "mp4"])
-        else:
-            selected = self.audio_source_var.get()
-            selector = self.audio_formats.get(selected, "bestaudio/best")
+                selector = video_id if has_audio else f"{video_id}+bestaudio/best"
             command.extend(["--format", selector])
-            output_format = self.audio_output_var.get()
-            if output_format != "Оригинал":
-                command.extend(["--extract-audio", "--audio-format", output_format, "--audio-quality", "0"])
+            if not separate:
+                command.extend(["--merge-output-format", "mp4"])
+        else:
+            item = self.audio_formats.get(self.selected_audio, {})
+            command.extend(["--format", str(item.get("format_id") or "bestaudio/best")])
+            output = self.audio_output_var.get()
+            if output != "Оригинал":
+                command.extend(["--extract-audio", "--audio-format", output, "--audio-quality", "0"])
         return command
 
-    def _start_download(self) -> None:
-        if self.process:
-            return
-        validated = self._validate_url_and_executable()
-        if not validated:
-            return
-        url, executable = validated
-        output_dir = Path(self.output_var.get().strip()).expanduser()
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            messagebox.showerror(APP_NAME, f"Не удалось открыть папку:\n{error}")
-            return
-        self._save_settings()
-        self.progress.set(0)
-        self._set_busy(True, "download")
-        self.status_var.set("Подготовка загрузки…")
-        self._append_log("\nЗапуск загрузки…\n")
-        command = self._build_download_command(executable, url, output_dir)
-        threading.Thread(target=self._run_download, args=(command,), daemon=True).start()
+    def _collect_download(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        for line in self.process.stdout:
+            self.events.put(("line", line))
+            match = PROGRESS_RE.search(line)
+            if match:
+                self.events.put(("progress", float(match.group(1))))
+        code = self.process.wait()
+        self.process = None
+        self.events.put(("finished", code))
 
-    def _run_download(self, command: list[str]) -> None:
-        try:
-            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            self.process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding="utf-8", errors="replace", bufsize=1, creationflags=flags,
-            )
-            assert self.process.stdout is not None
-            for line in self.process.stdout:
-                self.events.put(("line", line))
-                match = PROGRESS_RE.search(line)
-                if match:
-                    self.events.put(("progress", float(match.group(1))))
-            self.events.put(("finished", self.process.wait()))
-        except OSError as error:
-            self.events.put(("operation_error", str(error)))
-        finally:
-            self.process = None
-
-    def _poll_events(self) -> None:
+    def _poll(self) -> None:
         try:
             while True:
                 event, payload = self.events.get_nowait()
-                if event == "line":
-                    self._append_log(str(payload))
+                if event == "analysis":
+                    url, data = payload
+                    self._apply_analysis(str(url), data)
+                elif event == "error":
+                    self.loading.stop()
+                    self.loading.grid_remove()
+                    self.status_var.set("Не удалось прочитать ссылку")
+                    messagebox.showerror(APP_NAME, str(payload))
+                elif event == "line":
+                    self._log(str(payload))
                 elif event == "progress":
                     value = float(payload)
                     self.progress.set(value / 100)
-                    self.status_var.set(f"Загрузка: {value:.1f}%")
-                elif event == "analysis_result":
-                    self._set_busy(False)
-                    self._apply_analysis(payload if isinstance(payload, dict) else {})
-                elif event == "analysis_error":
-                    self._set_busy(False)
-                    self.media_title_var.set("Не удалось проанализировать ссылку")
-                    self.media_details_var.set(str(payload))
-                    self.status_var.set("Ошибка анализа")
-                    self._append_log(f"Ошибка анализа: {payload}\n")
+                    self.status_var.set(f"Скачивание · {value:.1f}%")
                 elif event == "finished":
-                    self._set_busy(False)
+                    self.cancel_button.grid_remove()
+                    self.download_button.grid()
                     if int(payload) == 0:
                         self.progress.set(1)
-                        self.status_var.set("Загрузка завершена")
-                        self._append_log("Готово.\n")
+                        self.status_var.set("Готово")
+                        self.open_button.grid(row=0, column=2, sticky="e")
+                        self._log("Готово.\n")
                     else:
-                        self.status_var.set("Загрузка завершилась с ошибкой")
-                        self._append_log(f"yt-dlp завершился с кодом {payload}.\n")
-                elif event == "operation_error":
-                    self._set_busy(False)
-                    self.status_var.set("Не удалось запустить yt-dlp")
-                    self._append_log(f"Ошибка запуска: {payload}\n")
+                        self.status_var.set("Ошибка загрузки — откройте подробности")
         except queue.Empty:
             pass
-        self.after(100, self._poll_events)
+        self.after(100, self._poll)
 
-    def _set_busy(self, busy: bool, action: str | None = None) -> None:
-        self.current_action = action if busy else None
-        state = "disabled" if busy else "normal"
-        self.download_button.configure(state=state)
-        self.analyze_button.configure(state=state)
-        self.cancel_button.configure(state="normal" if busy else "disabled")
+    def _choose_folder(self) -> None:
+        selected = filedialog.askdirectory(initialdir=self.output_var.get())
+        if selected:
+            self.output_var.set(selected)
+            self.folder_button.configure(text=self._folder_label())
 
-    def _cancel_operation(self) -> None:
-        process = self.process
-        if process and process.poll() is None:
-            process.terminate()
-            self.status_var.set("Операция отменяется…")
-            self._append_log("Операция отменена пользователем.\n")
+    def _folder_label(self) -> str:
+        return f"Сохранить в  ·  {self.output_var.get()}"
 
-    def _append_log(self, text: str) -> None:
+    def _toggle_log(self) -> None:
+        self.log_open = not self.log_open
+        if self.log_open:
+            self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
+            self.content.grid_rowconfigure(8, weight=1)
+            self.geometry("820x850")
+            self.log_button.configure(text="Скрыть подробности")
+        else:
+            self.log.grid_remove()
+            self.content.grid_rowconfigure(8, weight=0)
+            self.geometry("820x700")
+            self.log_button.configure(text="Подробности")
+
+    def _log(self, text: str) -> None:
         self.log.configure(state="normal")
         self.log.insert("end", text)
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    def _clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-
-    def _open_output(self) -> None:
-        output_dir = Path(self.output_var.get().strip()).expanduser()
-        if not output_dir.exists():
-            messagebox.showwarning(APP_NAME, "Папка сохранения пока не существует.")
-            return
-        try:
-            if os.name == "nt":
-                os.startfile(output_dir)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(output_dir)])
-            else:
-                subprocess.Popen(["xdg-open", str(output_dir)])
-        except OSError as error:
-            messagebox.showerror(APP_NAME, f"Не удалось открыть папку:\n{error}")
-
-    def _on_close(self) -> None:
-        self._save_settings()
+    def _cancel(self) -> None:
         if self.process and self.process.poll() is None:
-            if not messagebox.askyesno(APP_NAME, "Операция ещё выполняется. Остановить её и закрыть программу?"):
-                return
+            self.process.terminate()
+            self.status_var.set("Отмена…")
+
+    def _open_folder(self) -> None:
+        folder = Path(self.output_var.get())
+        if os.name == "nt":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
+
+    def _close(self) -> None:
+        if self.process and self.process.poll() is None:
             self.process.terminate()
         self.destroy()
 
 
 if __name__ == "__main__":
-    YtDlpGui().mainloop()
+    App().mainloop()

@@ -6,6 +6,7 @@ on:
     branches: [master]
     paths:
       - "app.py"
+      - "README.md"
       - ".github/workflows/build-windows.yml"
 
 permissions:
@@ -18,7 +19,7 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
@@ -33,19 +34,85 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install customtkinter pyinstaller
 
-      - name: Download embedded yt-dlp and FFmpeg
+      - name: Download yt-dlp and its legal files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "embedded" -Force | Out-Null
+          New-Item -ItemType Directory -Path "legal" -Force | Out-Null
+
+          $release = Invoke-RestMethod "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $tag = $release.tag_name
           Invoke-WebRequest `
             -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
             -OutFile "embedded/yt-dlp.exe"
           Invoke-WebRequest `
-            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
-            -OutFile "ffmpeg.zip"
-          Expand-Archive "ffmpeg.zip" "ffmpeg"
-          $bin = Get-ChildItem "ffmpeg" -Directory | Select-Object -First 1
-          Copy-Item "$($bin.FullName)/bin/ffmpeg.exe" "embedded/ffmpeg.exe"
+            -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$tag/LICENSE" `
+            -OutFile "legal/YT-DLP-LICENSE.txt"
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$tag/THIRD_PARTY_LICENSES.txt" `
+            -OutFile "legal/YT-DLP-THIRD-PARTY-LICENSES.txt"
+          Invoke-WebRequest `
+            -Uri "https://github.com/yt-dlp/yt-dlp/archive/refs/tags/$tag.zip" `
+            -OutFile "legal/yt-dlp-source.zip"
+
+      - name: Download LGPL FFmpeg build
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip" `
+            -OutFile "ffmpeg-lgpl.zip"
+          Expand-Archive "ffmpeg-lgpl.zip" "ffmpeg-lgpl"
+          $root = Get-ChildItem "ffmpeg-lgpl" -Directory | Select-Object -First 1
+          Copy-Item "$($root.FullName)/bin/ffmpeg.exe" "embedded/ffmpeg.exe"
+          Get-ChildItem "$($root.FullName)/bin" -Filter "*.dll" | Copy-Item -Destination "embedded"
+
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/LICENSE.md" `
+            -OutFile "legal/FFMPEG-LICENSE.md"
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1" `
+            -OutFile "legal/COPYING.LGPLv2.1.txt"
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv3" `
+            -OutFile "legal/COPYING.LGPLv3.txt"
+
+          $versionLine = (& "embedded/ffmpeg.exe" -version | Select-Object -First 1)
+          if ($versionLine -match 'g([0-9a-f]{7,40})') {
+            $commit = $Matches[1]
+            Invoke-WebRequest `
+              -Uri "https://github.com/FFmpeg/FFmpeg/archive/$commit.zip" `
+              -OutFile "legal/ffmpeg-source-$commit.zip"
+          } else {
+            Invoke-WebRequest `
+              -Uri "https://github.com/FFmpeg/FFmpeg/archive/refs/heads/master.zip" `
+              -OutFile "legal/ffmpeg-source.zip"
+          }
+
+      - name: Create third-party notice
+        shell: pwsh
+        run: |
+          @'
+          THIRD-PARTY SOFTWARE NOTICES
+
+          This product invokes the following independent command-line programs:
+
+          1. yt-dlp
+             Project: https://github.com/yt-dlp/yt-dlp
+             License: Unlicense; bundled dependencies use their own licenses.
+             Full notices: YT-DLP-THIRD-PARTY-LICENSES.txt
+
+          2. FFmpeg
+             Project: https://ffmpeg.org
+             Binary provider: https://github.com/BtbN/FFmpeg-Builds
+             Build type: win64 LGPL shared
+             License: LGPL; see FFMPEG-LICENSE.md and COPYING.LGPL files.
+
+          The GUI launches yt-dlp and FFmpeg as separate subprocesses and does not
+          link against their libraries. Corresponding source archives are attached
+          to the same GitHub Release as the executable.
+
+          FFmpeg and yt-dlp are not affiliated with or endorsed by this project.
+          '@ | Set-Content -Path "legal/THIRD-PARTY-NOTICES.txt" -Encoding UTF8
 
       - name: Create runtime hook
         shell: pwsh
@@ -62,13 +129,20 @@ jobs:
       - name: Build single portable EXE
         shell: pwsh
         run: |
+          $binaryArgs = @()
+          Get-ChildItem "embedded" -File | ForEach-Object {
+            $binaryArgs += "--add-binary"
+            $binaryArgs += "$($_.FullName);."
+          }
+
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name yt-dlp-gui `
             --collect-all customtkinter `
             --runtime-hook "embedded_tools_path.py" `
-            --add-binary "embedded/yt-dlp.exe;." `
-            --add-binary "embedded/ffmpeg.exe;." `
+            --add-data "legal;licenses" `
+            @binaryArgs `
             app.py
+
           $size = [math]::Round((Get-Item "dist/yt-dlp-gui.exe").Length / 1MB, 1)
           "Single EXE size: $size MB" | Write-Host
 
@@ -78,8 +152,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-${{ github.run_number }}"
-          gh release create $tag "dist/yt-dlp-gui.exe#yt-dlp-gui.exe" `
+          $sourceAssets = Get-ChildItem "legal" -Filter "*-source*.zip" | ForEach-Object { $_.FullName }
+          $assets = @(
+            "dist/yt-dlp-gui.exe#yt-dlp-gui.exe",
+            "legal/THIRD-PARTY-NOTICES.txt",
+            "legal/YT-DLP-LICENSE.txt",
+            "legal/YT-DLP-THIRD-PARTY-LICENSES.txt",
+            "legal/FFMPEG-LICENSE.md",
+            "legal/COPYING.LGPLv2.1.txt",
+            "legal/COPYING.LGPLv3.txt"
+          ) + $sourceAssets
+
+          gh release create $tag @assets `
             --target "${{ github.sha }}" `
             --title "yt-dlp GUI — build ${{ github.run_number }}" `
-            --notes "Один готовый EXE для Windows. yt-dlp и FFmpeg уже встроены внутрь; Python, распаковка и дополнительные файлы не требуются." `
+            --notes "Один готовый EXE для Windows. Внутри находятся официальный yt-dlp и LGPL shared build FFmpeg. Уведомления о лицензиях и соответствующие исходные архивы приложены к релизу." `
             --latest

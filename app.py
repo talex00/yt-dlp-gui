@@ -22,48 +22,57 @@ PASTE_KEYCODES = {86, 55}
 # Keysym reported for the same physical key under a Cyrillic layout.
 PASTE_KEYSYMS = {"cyrillic_em"}
 
+# The layout is authored for these logical sizes. Actual pixels are derived
+# from them by the scaling factor computed in App._init_scaling.
+BASE_WIDTH = 840
+BASE_HEIGHT = 900
+# Room reserved for the taskbar and the window frame.
+CHROME_MARGIN = 110
+MIN_SCALING = 0.62
+MAX_AUTO_SCALING = 2.0
+
 SIZE_UNITS = {
-    "ru": ("\u0411", "\u041a\u0411", "\u041c\u0411", "\u0413\u0411"),
+    "ru": ("Б", "КБ", "МБ", "ГБ"),
     "en": ("B", "KB", "MB", "GB"),
 }
 
 TEXTS: dict[str, dict[str, str]] = {
     "ru": {
-        "url_hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u044e\u0434\u0430 \u0441\u0441\u044b\u043b\u043a\u0443 \u043d\u0430 \u0432\u0438\u0434\u0435\u043e",
-        "mode_video": "\u0412\u0438\u0434\u0435\u043e",
-        "mode_audio": "\u0410\u0443\u0434\u0438\u043e",
-        "codec": "\u041a\u043e\u0434\u0435\u043a",
-        "audio_format": "\u0424\u043e\u0440\u043c\u0430\u0442 \u0444\u0430\u0439\u043b\u0430",
-        "audio_original": "\u041e\u0440\u0438\u0433\u0438\u043d\u0430\u043b",
-        "separate": "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u0438\u0434\u0435\u043e \u0438 \u0430\u0443\u0434\u0438\u043e \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e",
-        "playlist": "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u0435\u0441\u044c \u043f\u043b\u0435\u0439\u043b\u0438\u0441\u0442",
-        "save_to": "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432",
-        "download_video": "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u0438\u0434\u0435\u043e \u0441 \u0430\u0443\u0434\u0438\u043e",
-        "download_audio": "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0430\u0443\u0434\u0438\u043e",
-        "cancel": "\u041e\u0442\u043c\u0435\u043d\u0430",
-        "details": "\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0438",
-        "hide_details": "\u0421\u043a\u0440\u044b\u0442\u044c \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0438",
-        "open_folder": "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u0430\u043f\u043a\u0443",
-        "default_title": "\u0412\u0438\u0434\u0435\u043e",
-        "kbps": "\u043a\u0431\u0438\u0442/\u0441",
-        "size_unknown": "\u0440\u0430\u0437\u043c\u0435\u0440 \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u0435\u043d",
-        "size_ready": "\u041f\u0440\u0438\u043c\u0435\u0440\u043d\u044b\u0439 \u0440\u0430\u0437\u043c\u0435\u0440 \u0433\u043e\u0442\u043e\u0432\u043e\u0433\u043e \u0444\u0430\u0439\u043b\u0430: {size}",
-        "size_total": "\u041f\u0440\u0438\u043c\u0435\u0440\u043d\u044b\u0439 \u0440\u0430\u0437\u043c\u0435\u0440: {size} \u00b7 {suffix}",
-        "size_suffix_separate": "\u0441\u0443\u043c\u043c\u0430\u0440\u043d\u043e \u0434\u043b\u044f \u0434\u0432\u0443\u0445 \u0444\u0430\u0439\u043b\u043e\u0432",
-        "size_suffix_merge": "\u043f\u043e\u0441\u043b\u0435 \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f \u0441 \u0430\u0443\u0434\u0438\u043e",
-        "status_choose": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u0438 \u043a\u043e\u0434\u0435\u043a",
-        "status_prepare": "\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430\u2026",
-        "status_progress": "\u0421\u043a\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435 \u00b7 {value:.1f}%",
-        "status_done_merged": "\u0413\u043e\u0442\u043e\u0432\u043e \u00b7 \u0432\u0438\u0434\u0435\u043e \u0438 \u0430\u0443\u0434\u0438\u043e \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u044b",
-        "status_done": "\u0413\u043e\u0442\u043e\u0432\u043e",
-        "status_failed": "\u041e\u0448\u0438\u0431\u043a\u0430 \u2014 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0438",
-        "status_cancelling": "\u041e\u0442\u043c\u0435\u043d\u0430\u2026",
-        "status_bad_link": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u043e\u0447\u0438\u0442\u0430\u0442\u044c \u0441\u0441\u044b\u043b\u043a\u0443",
-        "error_yt_dlp": "yt-dlp \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d \u0440\u044f\u0434\u043e\u043c \u0441 \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u043e\u0439.",
-        "error_ffmpeg": "FFmpeg \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d. \u0411\u0435\u0437 \u043d\u0435\u0433\u043e \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c \u0432\u0438\u0434\u0435\u043e \u0438 \u0430\u0443\u0434\u0438\u043e.",
-        "error_code": "yt-dlp: \u043a\u043e\u0434 {code}",
-        "log_start": "\n\u0417\u0430\u043f\u0443\u0441\u043a \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438:\n",
-        "log_done": "\u0413\u043e\u0442\u043e\u0432\u043e.\n",
+        "url_hint": "Вставьте сюда ссылку на видео",
+        "mode_video": "Видео",
+        "mode_audio": "Аудио",
+        "codec": "Кодек",
+        "audio_format": "Формат файла",
+        "audio_original": "Оригинал",
+        "separate": "Скачать видео и аудио отдельно",
+        "playlist": "Скачать весь плейлист",
+        "save_to": "Сохранить в",
+        "download_video": "Скачать видео с аудио",
+        "download_audio": "Скачать аудио",
+        "cancel": "Отмена",
+        "details": "Подробности",
+        "hide_details": "Скрыть подробности",
+        "open_folder": "Открыть папку",
+        "default_title": "Видео",
+        "kbps": "кбит/с",
+        "size_unknown": "размер неизвестен",
+        "size_ready": "Примерный размер готового файла: {size}",
+        "size_total": "Примерный размер: {size} · {suffix}",
+        "size_suffix_separate": "суммарно для двух файлов",
+        "size_suffix_merge": "после объединения с аудио",
+        "status_choose": "Выберите качество и кодек",
+        "status_prepare": "Подготовка…",
+        "status_progress": "Скачивание · {value:.1f}%",
+        "status_done_merged": "Готово · видео и аудио объединены",
+        "status_done": "Готово",
+        "status_failed": "Ошибка — откройте подробности",
+        "status_cancelling": "Отмена…",
+        "status_bad_link": "Не удалось прочитать ссылку",
+        "error_yt_dlp": "yt-dlp не найден рядом с программой.",
+        "error_ffmpeg": "FFmpeg не найден. Без него невозможно объединить видео и аудио.",
+        "error_code": "yt-dlp: код {code}",
+        "log_start": "\nЗапуск загрузки:\n",
+        "log_done": "Готово.\n",
     },
     "en": {
         "url_hint": "Paste a video link here",
@@ -85,16 +94,16 @@ TEXTS: dict[str, dict[str, str]] = {
         "kbps": "kbps",
         "size_unknown": "size unknown",
         "size_ready": "Estimated file size: {size}",
-        "size_total": "Estimated size: {size} \u00b7 {suffix}",
+        "size_total": "Estimated size: {size} · {suffix}",
         "size_suffix_separate": "total for two files",
         "size_suffix_merge": "after merging with audio",
         "status_choose": "Pick quality and codec",
-        "status_prepare": "Preparing\u2026",
-        "status_progress": "Downloading \u00b7 {value:.1f}%",
-        "status_done_merged": "Done \u00b7 video and audio merged",
+        "status_prepare": "Preparing…",
+        "status_progress": "Downloading · {value:.1f}%",
+        "status_done_merged": "Done · video and audio merged",
         "status_done": "Done",
-        "status_failed": "Failed \u2014 open the details",
-        "status_cancelling": "Cancelling\u2026",
+        "status_failed": "Failed — open the details",
+        "status_cancelling": "Cancelling…",
         "status_bad_link": "Could not read this link",
         "error_yt_dlp": "yt-dlp was not found next to the app.",
         "error_ffmpeg": "FFmpeg was not found. It is required to merge video and audio.",
@@ -104,7 +113,7 @@ TEXTS: dict[str, dict[str, str]] = {
     },
 }
 
-URL_PLACEHOLDER = "https://www.youtube.com/watch?v=\u2026"
+URL_PLACEHOLDER = "https://www.youtube.com/watch?v=…"
 AUDIO_OUTPUTS = ("mp3", "m4a", "opus", "wav", "flac")
 ORIGINAL_LABELS = {texts["audio_original"] for texts in TEXTS.values()}
 
@@ -164,9 +173,12 @@ def format_size(item: dict[str, Any], media_duration: float) -> float:
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
+        # Must run before any widget is created: it sets the global scaling.
+        self.ui_scaling = self._init_scaling()
         self.title(APP_NAME)
-        self.geometry("760x210")
-        self.minsize(620, 190)
+        self._apply_geometry(760, 210)
+        self._apply_minsize(620, 190)
+        self.resizable(True, True)
         self.configure(fg_color=("#f6f6f4", "#181818"))
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -208,6 +220,64 @@ class App(ctk.CTk):
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
+    # ---------- scaling ----------
+
+    def _dpi_scaling(self) -> float:
+        """System scaling factor: 1.0 at 100%, 1.5 at 150%, and so on.
+
+        Read before any custom scaling is applied, so it is the pure DPI value.
+        """
+        try:
+            return float(ctk.ScalingTracker.get_window_scaling(self))
+        except Exception:
+            try:
+                return max(1.0, float(self.winfo_fpixels("1i")) / 96.0)
+            except Exception:
+                return 1.0
+
+    def _init_scaling(self) -> float:
+        """Pick a scaling factor that fits the layout onto the actual screen.
+
+        customtkinter multiplies every size by the DPI factor, so a 1080p
+        screen at 125-150% used to get a window taller than the screen itself.
+        The factor below never lets the window outgrow the visible work area,
+        and on a large screen without system scaling it grows the UI instead.
+        """
+        dpi = max(self._dpi_scaling(), 0.5)
+        screen_width = max(int(self.winfo_screenwidth()), 800)
+        screen_height = max(int(self.winfo_screenheight()), 600)
+        if dpi > 1.05:
+            # The system already asks for a bigger UI, follow it as the target.
+            suggested = dpi
+        else:
+            # No system scaling: grow on 4K, stay untouched on 1080p.
+            suggested = min(max(screen_height / 1080.0, 1.0), MAX_AUTO_SCALING)
+        fits = min(
+            screen_width * 0.92 / BASE_WIDTH,
+            (screen_height - CHROME_MARGIN) / BASE_HEIGHT,
+        )
+        total = max(min(suggested, fits), MIN_SCALING)
+        # customtkinter scales by dpi * factor, so compensate for the DPI part.
+        factor = total / dpi
+        ctk.set_widget_scaling(factor)
+        ctk.set_window_scaling(factor)
+        return total
+
+    def _screen_limits(self) -> tuple[int, int]:
+        """Largest window size, in layout units, that still fits the screen."""
+        scaling = max(self.ui_scaling, 0.1)
+        max_width = int(self.winfo_screenwidth() * 0.96 / scaling)
+        max_height = int((self.winfo_screenheight() - CHROME_MARGIN) / scaling)
+        return max(max_width, 480), max(max_height, 320)
+
+    def _apply_geometry(self, width: int, height: int) -> None:
+        max_width, max_height = self._screen_limits()
+        self.geometry(f"{min(width, max_width)}x{min(height, max_height)}")
+
+    def _apply_minsize(self, width: int, height: int) -> None:
+        max_width, max_height = self._screen_limits()
+        self.minsize(min(width, max_width), min(height, max_height))
+
     # ---------- localization ----------
 
     def tr(self, key: str, **kwargs: Any) -> str:
@@ -221,7 +291,7 @@ class App(ctk.CTk):
         value = size
         for unit in units:
             if value < 1024 or unit == units[-1]:
-                return f"\u2248 {value:.1f} {unit}"
+                return f"≈ {value:.1f} {unit}"
             value /= 1024
         return self.tr("size_unknown")
 
@@ -484,7 +554,7 @@ class App(ctk.CTk):
             height=170,
             corner_radius=10,
             wrap="word",
-            font=("Consolas", 11),
+            font=ctk.CTkFont(family="Consolas", size=11),
         )
         self.log.configure(state="disabled")
 
@@ -494,7 +564,7 @@ class App(ctk.CTk):
         """Paste on Ctrl+V even when the active keyboard layout is not Latin.
 
         Tk resolves Ctrl+V through the keysym, so with a Cyrillic layout the
-        stroke arrives as Ctrl+\u043c and the built-in <<Paste>> never fires.
+        stroke arrives as Ctrl+м and the built-in <<Paste>> never fires.
         The physical key is still reported in event.keycode, so we use that.
         Latin layouts keep using the built-in binding, so nothing is pasted twice.
         """
@@ -573,7 +643,7 @@ class App(ctk.CTk):
         self.title_var.set(str(data.get("title") or self.tr("default_title")))
         author = str(data.get("channel") or data.get("uploader") or "")
         length = duration(data.get("duration"))
-        self.meta_var.set("  \u00b7  ".join(value for value in (author, length) if value))
+        self.meta_var.set("  ·  ".join(value for value in (author, length) if value))
         self._prepare_formats(data.get("formats") or [])
         self._reveal_content()
         self._refresh_mode_views()
@@ -609,7 +679,7 @@ class App(ctk.CTk):
             height = int(item.get("height") or 0)
             fps = int(item.get("fps") or 0)
             quality_key = (height, fps)
-            codec_key = f"{codec(item.get('vcodec'))} \u00b7 {str(item.get('ext') or '?').upper()}"
+            codec_key = f"{codec(item.get('vcodec'))} · {str(item.get('ext') or '?').upper()}"
             previous = grouped.setdefault(quality_key, {}).get(codec_key)
             score = (
                 str(item.get("acodec") or "none") == "none",
@@ -667,7 +737,7 @@ class App(ctk.CTk):
         extension = str(item.get("ext") or "").upper()
         return (
             f"{abr or '?'} {self.tr('kbps')}\n"
-            f"{codec(item.get('acodec'))} \u00b7 {extension} \u00b7 {size}"
+            f"{codec(item.get('acodec'))} · {extension} · {size}"
         )
 
     def _render_quality_buttons(self) -> None:
@@ -792,14 +862,14 @@ class App(ctk.CTk):
         self.loading.grid_remove()
         self.content.grid(row=1, column=0, sticky="nsew")
         self.revealed = True
-        self.geometry("840x820")
-        self.minsize(720, 720)
+        self._apply_geometry(840, 820)
+        self._apply_minsize(700, 620)
 
     def _hide_content(self) -> None:
         self.content.grid_remove()
         self.revealed = False
-        self.geometry("760x210")
-        self.minsize(620, 190)
+        self._apply_minsize(620, 190)
+        self._apply_geometry(760, 210)
 
     # ---------- download ----------
 
@@ -926,19 +996,19 @@ class App(ctk.CTk):
             self.folder_button.configure(text=self._folder_label())
 
     def _folder_label(self) -> str:
-        return f"{self.tr('save_to')}  \u00b7  {self.output_var.get()}"
+        return f"{self.tr('save_to')}  ·  {self.output_var.get()}"
 
     def _toggle_log(self) -> None:
         self.log_open = not self.log_open
         if self.log_open:
             self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
             self.content.grid_rowconfigure(8, weight=1)
-            self.geometry("840x970")
+            self._apply_geometry(840, 970)
             self.log_button.configure(text=self.tr("hide_details"))
         else:
             self.log.grid_remove()
             self.content.grid_rowconfigure(8, weight=0)
-            self.geometry("840x820")
+            self._apply_geometry(840, 820)
             self.log_button.configure(text=self.tr("details"))
 
     def _log(self, text: str) -> None:

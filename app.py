@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import queue
@@ -31,6 +32,12 @@ CHROME_MARGIN = 110
 MIN_SCALING = 0.62
 MAX_AUTO_SCALING = 2.0
 
+WINDOW_BG = ("#f6f6f4", "#181818")
+CONTROL_BG = ("#ffffff", "#242424")
+# Two logical pixels and higher contrast keep rounded outlines crisp at
+# fractional Windows scales such as 125% and 150%.
+CONTROL_BORDER = ("#9b9b96", "#666666")
+
 SIZE_UNITS = {
     "ru": ("Б", "КБ", "МБ", "ГБ"),
     "en": ("B", "KB", "MB", "GB"),
@@ -46,6 +53,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "audio_original": "Оригинал",
         "separate": "Скачать видео и аудио отдельно",
         "playlist": "Скачать весь плейлист",
+        "subtitles": "Встроить субтитры",
+        "subtitles_unavailable": "Субтитры недоступны",
+        "subtitle_auto": "авто",
         "save_to": "Сохранить в",
         "download_video": "Скачать видео с аудио",
         "download_audio": "Скачать аудио",
@@ -69,7 +79,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_cancelling": "Отмена…",
         "status_bad_link": "Не удалось прочитать ссылку",
         "error_yt_dlp": "yt-dlp не найден рядом с программой.",
-        "error_ffmpeg": "FFmpeg не найден. Без него невозможно объединить видео и аудио.",
+        "error_ffmpeg": "FFmpeg не найден. Он нужен для объединения видео, аудио и субтитров.",
         "error_code": "yt-dlp: код {code}",
         "log_start": "\nЗапуск загрузки:\n",
         "log_done": "Готово.\n",
@@ -83,6 +93,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "audio_original": "Original",
         "separate": "Download video and audio separately",
         "playlist": "Download the whole playlist",
+        "subtitles": "Embed subtitles",
+        "subtitles_unavailable": "Subtitles unavailable",
+        "subtitle_auto": "auto",
         "save_to": "Save to",
         "download_video": "Download video with audio",
         "download_audio": "Download audio",
@@ -106,7 +119,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_cancelling": "Cancelling…",
         "status_bad_link": "Could not read this link",
         "error_yt_dlp": "yt-dlp was not found next to the app.",
-        "error_ffmpeg": "FFmpeg was not found. It is required to merge video and audio.",
+        "error_ffmpeg": "FFmpeg was not found. It is required to merge video, audio and subtitles.",
         "error_code": "yt-dlp: exit code {code}",
         "log_start": "\nStarting download:\n",
         "log_done": "Done.\n",
@@ -179,7 +192,7 @@ class App(ctk.CTk):
         self._apply_geometry(760, 210)
         self._apply_minsize(620, 190)
         self.resizable(True, True)
-        self.configure(fg_color=("#f6f6f4", "#181818"))
+        self.configure(fg_color=WINDOW_BG)
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
@@ -191,11 +204,14 @@ class App(ctk.CTk):
         # Keys are stable ids, never localized text.
         self.video_groups: dict[str, dict[str, dict[str, Any]]] = {}
         self.audio_formats: dict[str, dict[str, Any]] = {}
+        self.subtitle_tracks: list[dict[str, Any]] = []
+        self.subtitle_display_to_code: dict[str, str] = {}
         self.quality_buttons: list[ctk.CTkButton] = []
         self.codec_buttons: list[ctk.CTkButton] = []
         self.selected_quality = ""
         self.selected_codec = ""
         self.selected_audio = ""
+        self.selected_subtitle_code = ""
 
         self.revealed = False
         self.log_open = False
@@ -211,22 +227,22 @@ class App(ctk.CTk):
         self.audio_output_var = ctk.StringVar(value=self.tr("audio_original"))
         self.playlist_var = ctk.BooleanVar(value=False)
         self.separate_var = ctk.BooleanVar(value=False)
+        self.subtitle_var = ctk.BooleanVar(value=False)
+        self.subtitle_choice_var = ctk.StringVar(value="—")
         self.status_var = ctk.StringVar(value="")
         self.title_var = ctk.StringVar(value="")
         self.meta_var = ctk.StringVar(value="")
         self.size_var = ctk.StringVar(value="")
 
         self._build()
+        self.after(80, self._style_title_bar)
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-    # ---------- scaling ----------
+    # ---------- scaling / native window ----------
 
     def _dpi_scaling(self) -> float:
-        """System scaling factor: 1.0 at 100%, 1.5 at 150%, and so on.
-
-        Read before any custom scaling is applied, so it is the pure DPI value.
-        """
+        """System scaling factor: 1.0 at 100%, 1.5 at 150%, and so on."""
         try:
             return float(ctk.ScalingTracker.get_window_scaling(self))
         except Exception:
@@ -236,35 +252,32 @@ class App(ctk.CTk):
                 return 1.0
 
     def _init_scaling(self) -> float:
-        """Pick a scaling factor that fits the layout onto the actual screen.
+        """Pick a scaling factor that fits the layout and remains readable.
 
-        customtkinter multiplies every size by the DPI factor, so a 1080p
-        screen at 125-150% used to get a window taller than the screen itself.
-        The factor below never lets the window outgrow the visible work area,
-        and on a large screen without system scaling it grows the UI instead.
+        Fractionally scaled Full HD screens are constrained by available height.
+        A 4K screen receives a small readability boost over raw Windows DPI,
+        while a 4K screen at 100% still grows the UI automatically.
         """
         dpi = max(self._dpi_scaling(), 0.5)
         screen_width = max(int(self.winfo_screenwidth()), 800)
         screen_height = max(int(self.winfo_screenheight()), 600)
         if dpi > 1.05:
-            # The system already asks for a bigger UI, follow it as the target.
-            suggested = dpi
+            four_k_boost = min(screen_height / 1234.0, MAX_AUTO_SCALING)
+            suggested = max(dpi, four_k_boost)
         else:
-            # No system scaling: grow on 4K, stay untouched on 1080p.
             suggested = min(max(screen_height / 1080.0, 1.0), MAX_AUTO_SCALING)
         fits = min(
             screen_width * 0.92 / BASE_WIDTH,
             (screen_height - CHROME_MARGIN) / BASE_HEIGHT,
         )
         total = max(min(suggested, fits), MIN_SCALING)
-        # customtkinter scales by dpi * factor, so compensate for the DPI part.
+        # CustomTkinter already multiplies by DPI, so set only the correction.
         factor = total / dpi
         ctk.set_widget_scaling(factor)
         ctk.set_window_scaling(factor)
         return total
 
     def _screen_limits(self) -> tuple[int, int]:
-        """Largest window size, in layout units, that still fits the screen."""
         scaling = max(self.ui_scaling, 0.1)
         max_width = int(self.winfo_screenwidth() * 0.96 / scaling)
         max_height = int((self.winfo_screenheight() - CHROME_MARGIN) / scaling)
@@ -277,6 +290,42 @@ class App(ctk.CTk):
     def _apply_minsize(self, width: int, height: int) -> None:
         max_width, max_height = self._screen_limits()
         self.minsize(min(width, max_width), min(height, max_height))
+
+    @staticmethod
+    def _colorref(hex_color: str) -> int:
+        value = hex_color.lstrip("#")
+        red, green, blue = (int(value[index:index + 2], 16) for index in (0, 2, 4))
+        return red | (green << 8) | (blue << 16)
+
+    def _style_title_bar(self) -> None:
+        """Blend the native Windows caption into the application surface."""
+        if os.name != "nt":
+            return
+        try:
+            self.update_idletasks()
+            child = int(self.winfo_id())
+            hwnd = int(ctypes.windll.user32.GetParent(child) or child)
+            dark = ctk.get_appearance_mode().lower() == "dark"
+            background = WINDOW_BG[1 if dark else 0]
+            text = "#ffffff" if dark else "#111111"
+            dwm = ctypes.windll.dwmapi
+
+            dark_mode = ctypes.c_int(1 if dark else 0)
+            dwm.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(dark_mode), ctypes.sizeof(dark_mode)
+            )
+            for attribute, color in (
+                (34, background),  # DWMWA_BORDER_COLOR
+                (35, background),  # DWMWA_CAPTION_COLOR
+                (36, text),        # DWMWA_TEXT_COLOR
+            ):
+                value = ctypes.c_int(self._colorref(color))
+                dwm.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)
+                )
+        except Exception:
+            # Older Windows versions do not expose the color attributes.
+            pass
 
     # ---------- localization ----------
 
@@ -314,6 +363,7 @@ class App(ctk.CTk):
             self.audio_output_var.set(self.tr("audio_original"))
         self.separate_check.configure(text=self.tr("separate"))
         self.playlist_check.configure(text=self.tr("playlist"))
+        self._render_subtitle_choices()
         self.folder_button.configure(text=self._folder_label())
         self.cancel_button.configure(text=self.tr("cancel"))
         self.open_button.configure(text=self.tr("open_folder"))
@@ -359,8 +409,8 @@ class App(ctk.CTk):
             values=["RU", "EN"],
             variable=self.language_var,
             command=self._change_language,
-            width=76,
-            height=26,
+            width=80,
+            height=28,
             corner_radius=8,
             font=ctk.CTkFont(size=12),
         )
@@ -370,7 +420,9 @@ class App(ctk.CTk):
             textvariable=self.url_var,
             height=54,
             corner_radius=14,
-            border_width=1,
+            border_width=2,
+            border_color=CONTROL_BORDER,
+            fg_color=CONTROL_BG,
             placeholder_text=URL_PLACEHOLDER,
             font=ctk.CTkFont(size=15),
         )
@@ -400,7 +452,7 @@ class App(ctk.CTk):
             info,
             textvariable=self.meta_var,
             anchor="w",
-            text_color=("#747474", "#a5a5a5"),
+            text_color=("#686868", "#b0b0b0"),
             font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
@@ -425,7 +477,7 @@ class App(ctk.CTk):
             self.codec_section,
             text=self.tr("codec"),
             anchor="w",
-            text_color=("#747474", "#a5a5a5"),
+            text_color=("#686868", "#b0b0b0"),
         )
         self.codec_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.codec_frame = ctk.CTkFrame(self.codec_section, fg_color="transparent")
@@ -436,7 +488,7 @@ class App(ctk.CTk):
             self.codec_section,
             textvariable=self.size_var,
             anchor="w",
-            text_color=("#747474", "#a5a5a5"),
+            text_color=("#686868", "#b0b0b0"),
             font=ctk.CTkFont(size=12),
         ).grid(row=2, column=0, sticky="ew", pady=(7, 0))
 
@@ -446,7 +498,7 @@ class App(ctk.CTk):
             self.audio_options,
             text=self.tr("audio_format"),
             anchor="w",
-            text_color=("#747474", "#a5a5a5"),
+            text_color=("#686868", "#b0b0b0"),
         )
         self.audio_format_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.audio_output = ctk.CTkOptionMenu(
@@ -459,24 +511,52 @@ class App(ctk.CTk):
 
         options = ctk.CTkFrame(self.content, fg_color="transparent")
         options.grid(row=4, column=0, sticky="ew", padx=34, pady=(18, 0))
+        options.grid_columnconfigure(0, weight=1)
         options.grid_columnconfigure(1, weight=1)
         self.separate_check = ctk.CTkCheckBox(
             options,
             text=self.tr("separate"),
             variable=self.separate_var,
-            checkbox_width=20,
-            checkbox_height=20,
-            command=self._update_size_summary,
+            checkbox_width=21,
+            checkbox_height=21,
+            border_width=2,
+            border_color=CONTROL_BORDER,
+            command=self._separate_toggled,
         )
         self.separate_check.grid(row=0, column=0, sticky="w")
         self.playlist_check = ctk.CTkCheckBox(
             options,
             text=self.tr("playlist"),
             variable=self.playlist_var,
-            checkbox_width=20,
-            checkbox_height=20,
+            checkbox_width=21,
+            checkbox_height=21,
+            border_width=2,
+            border_color=CONTROL_BORDER,
         )
         self.playlist_check.grid(row=0, column=1, sticky="e")
+        self.subtitle_check = ctk.CTkCheckBox(
+            options,
+            text=self.tr("subtitles_unavailable"),
+            variable=self.subtitle_var,
+            checkbox_width=21,
+            checkbox_height=21,
+            border_width=2,
+            border_color=CONTROL_BORDER,
+            state="disabled",
+            command=self._subtitle_toggled,
+        )
+        self.subtitle_check.grid(row=1, column=0, sticky="w", pady=(14, 0))
+        self.subtitle_menu = ctk.CTkOptionMenu(
+            options,
+            values=["—"],
+            variable=self.subtitle_choice_var,
+            command=self._subtitle_selected,
+            width=260,
+            height=34,
+            dynamic_resizing=False,
+            state="disabled",
+        )
+        self.subtitle_menu.grid(row=1, column=1, sticky="e", pady=(14, 0))
 
         destination = ctk.CTkFrame(self.content, fg_color="transparent")
         destination.grid(row=5, column=0, sticky="ew", padx=34, pady=(15, 0))
@@ -485,10 +565,11 @@ class App(ctk.CTk):
             destination,
             text=self._folder_label(),
             anchor="w",
-            height=36,
+            height=38,
             fg_color="transparent",
-            border_width=1,
-            text_color=("#555555", "#c7c7c7"),
+            border_width=2,
+            border_color=CONTROL_BORDER,
+            text_color=("#4b4b4b", "#d0d0d0"),
             command=self._choose_folder,
         )
         self.folder_button.grid(row=0, column=0, sticky="ew")
@@ -511,15 +592,16 @@ class App(ctk.CTk):
             height=48,
             corner_radius=12,
             fg_color="transparent",
-            border_width=1,
-            text_color=("#555555", "#d0d0d0"),
+            border_width=2,
+            border_color=CONTROL_BORDER,
+            text_color=("#4b4b4b", "#d0d0d0"),
             command=self._cancel,
         )
         self.status = ctk.CTkLabel(
             actions,
             textvariable=self.status_var,
             anchor="w",
-            text_color=("#747474", "#a5a5a5"),
+            text_color=("#686868", "#b0b0b0"),
         )
         self.status.grid(row=1, column=0, sticky="ew", pady=(7, 0))
         self.progress = ctk.CTkProgressBar(actions, height=7)
@@ -534,7 +616,7 @@ class App(ctk.CTk):
             width=100,
             height=28,
             fg_color="transparent",
-            text_color=("#666666", "#aaaaaa"),
+            text_color=("#5b5b5b", "#b8b8b8"),
             hover_color=("#e9e9e6", "#252525"),
             command=self._toggle_log,
         )
@@ -545,7 +627,7 @@ class App(ctk.CTk):
             width=110,
             height=28,
             fg_color="transparent",
-            text_color=("#666666", "#aaaaaa"),
+            text_color=("#5b5b5b", "#b8b8b8"),
             hover_color=("#e9e9e6", "#252525"),
             command=self._open_folder,
         )
@@ -553,6 +635,8 @@ class App(ctk.CTk):
             self.content,
             height=170,
             corner_radius=10,
+            border_width=2,
+            border_color=CONTROL_BORDER,
             wrap="word",
             font=ctk.CTkFont(family="Consolas", size=11),
         )
@@ -561,13 +645,7 @@ class App(ctk.CTk):
     # ---------- paste / url ----------
 
     def _layout_agnostic_paste(self, event: Any) -> str | None:
-        """Paste on Ctrl+V even when the active keyboard layout is not Latin.
-
-        Tk resolves Ctrl+V through the keysym, so with a Cyrillic layout the
-        stroke arrives as Ctrl+м and the built-in <<Paste>> never fires.
-        The physical key is still reported in event.keycode, so we use that.
-        Latin layouts keep using the built-in binding, so nothing is pasted twice.
-        """
+        """Paste on Ctrl+V even when the active keyboard layout is not Latin."""
         keysym = str(getattr(event, "keysym", "")).lower()
         if keysym in {"v", "insert"}:
             return None
@@ -644,10 +722,115 @@ class App(ctk.CTk):
         author = str(data.get("channel") or data.get("uploader") or "")
         length = duration(data.get("duration"))
         self.meta_var.set("  ·  ".join(value for value in (author, length) if value))
+        self._prepare_subtitles(data)
         self._prepare_formats(data.get("formats") or [])
         self._reveal_content()
         self._refresh_mode_views()
         self._set_status("status_choose")
+
+    # ---------- subtitles ----------
+
+    def _prepare_subtitles(self, data: dict[str, Any]) -> None:
+        previous = self.selected_subtitle_code
+        tracks: list[dict[str, Any]] = []
+        manual = data.get("subtitles") or {}
+        automatic = data.get("automatic_captions") or {}
+        manual_codes = {
+            str(code) for code, variants in manual.items() if isinstance(variants, list) and variants
+        }
+
+        def add(source: object, is_automatic: bool) -> None:
+            if not isinstance(source, dict):
+                return
+            for raw_code, variants in source.items():
+                code = str(raw_code)
+                if is_automatic and code in manual_codes:
+                    continue
+                if not isinstance(variants, list) or not variants:
+                    continue
+                first = next((item for item in variants if isinstance(item, dict)), {})
+                name = str(first.get("name") or code)
+                tracks.append({"code": code, "name": name, "automatic": is_automatic})
+
+        add(manual, False)
+        add(automatic, True)
+
+        def priority(track: dict[str, Any]) -> tuple[int, int, str]:
+            code = str(track["code"]).lower()
+            preferred = (self.language, "en", "ru")
+            language_rank = len(preferred) + 1
+            for index, language in enumerate(preferred):
+                if code == language or code.startswith(f"{language}-"):
+                    language_rank = index
+                    break
+            return (1 if track["automatic"] else 0, language_rank, code)
+
+        self.subtitle_tracks = sorted(tracks, key=priority)
+        available_codes = {str(track["code"]) for track in self.subtitle_tracks}
+        self.selected_subtitle_code = previous if previous in available_codes else ""
+        if not self.selected_subtitle_code and self.subtitle_tracks:
+            self.selected_subtitle_code = str(self.subtitle_tracks[0]["code"])
+        if not self.subtitle_tracks:
+            self.subtitle_var.set(False)
+        self._render_subtitle_choices()
+
+    def _subtitle_label(self, track: dict[str, Any]) -> str:
+        code = str(track["code"])
+        name = str(track.get("name") or code).strip()
+        label = code if name.lower() == code.lower() else f"{name} · {code}"
+        if track.get("automatic"):
+            label += f" · {self.tr('subtitle_auto')}"
+        return label
+
+    def _render_subtitle_choices(self) -> None:
+        self.subtitle_display_to_code.clear()
+        labels: list[str] = []
+        selected_label = "—"
+        for track in self.subtitle_tracks:
+            label = self._subtitle_label(track)
+            if label in self.subtitle_display_to_code:
+                label = f"{label} ({len(labels) + 1})"
+            code = str(track["code"])
+            self.subtitle_display_to_code[label] = code
+            labels.append(label)
+            if code == self.selected_subtitle_code:
+                selected_label = label
+
+        available = bool(labels)
+        self.subtitle_menu.configure(values=labels or ["—"])
+        self.subtitle_choice_var.set(selected_label if available else "—")
+        self.subtitle_check.configure(
+            text=self.tr("subtitles" if available else "subtitles_unavailable"),
+            state="normal" if available else "disabled",
+        )
+        if not available:
+            self.subtitle_var.set(False)
+        self._sync_subtitle_controls()
+
+    def _sync_subtitle_controls(self) -> None:
+        enabled = bool(self.subtitle_tracks) and self.mode == "video"
+        self.subtitle_check.configure(state="normal" if enabled else "disabled")
+        menu_enabled = enabled and self.subtitle_var.get()
+        self.subtitle_menu.configure(state="normal" if menu_enabled else "disabled")
+
+    def _subtitle_selected(self, label: str) -> None:
+        code = self.subtitle_display_to_code.get(label)
+        if code:
+            self.selected_subtitle_code = code
+
+    def _subtitle_toggled(self) -> None:
+        if self.subtitle_var.get():
+            # Separate video/audio output has no single final container in which
+            # subtitles can be embedded, so the options are mutually exclusive.
+            self.separate_var.set(False)
+        self._sync_subtitle_controls()
+        self._update_size_summary()
+
+    def _separate_toggled(self) -> None:
+        if self.separate_var.get():
+            self.subtitle_var.set(False)
+        self._sync_subtitle_controls()
+        self._update_size_summary()
 
     # ---------- formats ----------
 
@@ -796,11 +979,11 @@ class App(ctk.CTk):
             text=text,
             height=height,
             corner_radius=10,
-            fg_color=("#2783de", "#3b8ed0") if active else ("#ffffff", "#242424"),
-            text_color="#ffffff" if active else ("#333333", "#eeeeee"),
-            border_width=0 if active else 1,
-            border_color=("#dededb", "#3a3a3a"),
-            hover_color=("#1f75c5", "#367baa") if active else ("#eeeeeb", "#303030"),
+            fg_color=("#2783de", "#3b8ed0") if active else CONTROL_BG,
+            text_color="#ffffff" if active else ("#2d2d2d", "#eeeeee"),
+            border_width=0 if active else 2,
+            border_color=CONTROL_BORDER,
+            hover_color=("#1f75c5", "#367baa") if active else ("#e8e8e5", "#303030"),
             command=command,
         )
 
@@ -847,12 +1030,17 @@ class App(ctk.CTk):
             self.audio_options.grid_remove()
             self.codec_section.grid(row=3, column=0, sticky="ew", padx=34, pady=(13, 0))
             self.separate_check.grid()
+            self.subtitle_check.grid()
+            self.subtitle_menu.grid()
             self.download_button.configure(text=self.tr("download_video"))
         else:
             self.codec_section.grid_remove()
             self.separate_check.grid_remove()
+            self.subtitle_check.grid_remove()
+            self.subtitle_menu.grid_remove()
             self.audio_options.grid(row=3, column=0, sticky="ew", padx=34, pady=(13, 0))
             self.download_button.configure(text=self.tr("download_audio"))
+        self._sync_subtitle_controls()
         self._render_quality_buttons()
         if self.mode == "video":
             self._render_codec_buttons()
@@ -862,8 +1050,8 @@ class App(ctk.CTk):
         self.loading.grid_remove()
         self.content.grid(row=1, column=0, sticky="nsew")
         self.revealed = True
-        self._apply_geometry(840, 820)
-        self._apply_minsize(700, 620)
+        self._apply_geometry(840, 870)
+        self._apply_minsize(700, 660)
 
     def _hide_content(self) -> None:
         self.content.grid_remove()
@@ -881,7 +1069,12 @@ class App(ctk.CTk):
             messagebox.showerror(APP_NAME, self.tr("error_yt_dlp"))
             return
         separate = self.separate_var.get() and self.mode == "video"
-        if self.mode == "video" and not separate and not find_tool("ffmpeg"):
+        subtitles = (
+            self.mode == "video"
+            and self.subtitle_var.get()
+            and bool(self.selected_subtitle_code)
+        )
+        if self.mode == "video" and (not separate or subtitles) and not find_tool("ffmpeg"):
             messagebox.showerror(APP_NAME, self.tr("error_ffmpeg"))
             return
         folder = Path(self.output_var.get()).expanduser()
@@ -935,6 +1128,17 @@ class App(ctk.CTk):
             command.extend(["--format", selector])
             if not separate:
                 command.extend(["--merge-output-format", "mp4", "--remux-video", "mp4"])
+            if self.subtitle_var.get() and self.selected_subtitle_code:
+                command.extend([
+                    "--write-subs",
+                    "--sub-langs",
+                    self.selected_subtitle_code,
+                    "--sub-format",
+                    "vtt/best",
+                    "--convert-subs",
+                    "srt",
+                    "--embed-subs",
+                ])
         else:
             item = self.audio_formats.get(self.selected_audio, {})
             command.extend(["--format", str(item.get("format_id") or "bestaudio/best")])
@@ -1003,12 +1207,12 @@ class App(ctk.CTk):
         if self.log_open:
             self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
             self.content.grid_rowconfigure(8, weight=1)
-            self._apply_geometry(840, 970)
+            self._apply_geometry(840, 1020)
             self.log_button.configure(text=self.tr("hide_details"))
         else:
             self.log.grid_remove()
             self.content.grid_rowconfigure(8, weight=0)
-            self._apply_geometry(840, 820)
+            self._apply_geometry(840, 870)
             self.log_button.configure(text=self.tr("details"))
 
     def _log(self, text: str) -> None:

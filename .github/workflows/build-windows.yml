@@ -6,6 +6,7 @@ on:
     branches: [master]
     paths:
       - "app.py"
+      - "dpi_physical_screen.py"
       - "README.md"
       - ".github/workflows/build-windows.yml"
 
@@ -168,6 +169,7 @@ jobs:
             --name yt-dlp-gui `
             --collect-all customtkinter `
             --runtime-hook "embedded_tools_path.py" `
+            --runtime-hook "dpi_physical_screen.py" `
             --add-data "legal;licenses" `
             @binaryArgs `
             app.py

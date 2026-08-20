@@ -1251,3 +1251,262 @@ class App(ctk.CTk):
             and bool(self.selected_subtitle_code)
         )
         needs_ffmpeg = self.mode == "video" and (not separate or subtitles)
+        if needs_ffmpeg and not _tool_ready("ffmpeg"):
+            messagebox.showinfo(APP_NAME, self.tr("tool_not_ready"))
+            return
+        if needs_ffmpeg and not ensure_local_copy("ffmpeg"):
+            messagebox.showerror(APP_NAME, self.tr("error_ffmpeg"))
+            return
+        folder = Path(self.output_var.get()).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        command = self._download_command(executable, folder)
+        self._set_status("status_prepare")
+        self.progress.set(0)
+        self.progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.download_button.grid_remove()
+        self.cancel_button.grid(row=0, column=0, sticky="ew")
+        self._log(self.tr("log_start") + subprocess.list2cmdline(command) + "\n\n")
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        threading.Thread(target=self._collect_download, daemon=True).start()
+
+    def _download_command(self, executable: str, folder: Path) -> list[str]:
+        separate = self.separate_var.get() and self.mode == "video"
+        template = "%(title)s [%(format_id)s].%(ext)s" if separate else "%(title)s [%(id)s].%(ext)s"
+        ffmpeg = ensure_local_copy("ffmpeg")
+        ffmpeg_location = str(Path(ffmpeg).parent) if ffmpeg else str(app_dir())
+        command = [
+            executable,
+            self.analyzed_url,
+            "--newline",
+            "--progress",
+            "--windows-filenames",
+            "--ffmpeg-location",
+            ffmpeg_location,
+            "--output",
+            str(folder / template),
+            "--yes-playlist" if self.playlist_var.get() else "--no-playlist",
+        ]
+        if self.mode == "video":
+            item = self._selected_video_format()
+            video_id = str(item.get("format_id") or "bestvideo")
+            has_audio = str(item.get("acodec") or "none") != "none"
+            if separate:
+                selector = f"{video_id},bestaudio"
+            elif has_audio:
+                selector = video_id
+            else:
+                selector = f"{video_id}+bestaudio[ext=m4a]/{video_id}+bestaudio/{video_id}+best"
+            command.extend(["--format", selector])
+            if not separate:
+                command.extend(["--merge-output-format", "mp4", "--remux-video", "mp4"])
+            if self.subtitle_var.get() and self.selected_subtitle_code:
+                command.extend([
+                    "--write-subs",
+                    "--sub-langs",
+                    self.selected_subtitle_code,
+                    "--sub-format",
+                    "vtt/best",
+                    "--convert-subs",
+                    "srt",
+                    "--embed-subs",
+                ])
+        else:
+            item = self.audio_formats.get(self.selected_audio, {})
+            command.extend(["--format", str(item.get("format_id") or "bestaudio/best")])
+            output = self._audio_output()
+            if output != "original":
+                command.extend(["--extract-audio", "--audio-format", output, "--audio-quality", "0"])
+        return command
+
+    def _collect_download(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        for line in self.process.stdout:
+            self.events.put(("line", line))
+            match = PROGRESS_RE.search(line)
+            if match:
+                self.events.put(("progress", float(match.group(1))))
+        code = self.process.wait()
+        self.process = None
+        self.events.put(("finished", code))
+
+    # ---------- yt-dlp self-update ----------
+
+    def _start_yt_dlp_update(self) -> None:
+        """Make sure yt-dlp/ffmpeg are present, then refresh yt-dlp in place.
+
+        The portable build no longer bundles yt-dlp/ffmpeg, so on a brand new
+        install this first downloads both into `local_tools_dir()`. yt-dlp
+        also ships new releases far more often than this wrapper does, so an
+        existing copy is refreshed in place on every launch.
+        """
+        self._set_tool_status("tool_checking")
+        threading.Thread(target=self._run_yt_dlp_update, daemon=True).start()
+
+    def _run_yt_dlp_update(self) -> None:
+        executable = ensure_local_copy(
+            "yt-dlp",
+            progress=lambda percent: self.events.put(("tool_progress", ("yt-dlp", percent))),
+        )
+        if not executable:
+            self.events.put(("tool_update", ("error", "")))
+            return
+        ffmpeg = ensure_local_copy(
+            "ffmpeg",
+            progress=lambda percent: self.events.put(("tool_progress", ("ffmpeg", percent))),
+        )
+        if not ffmpeg:
+            self.events.put(("tool_update", ("error_ffmpeg", "")))
+            return
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            result = subprocess.run(
+                [executable, "--update"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+                creationflags=creationflags,
+            )
+        except Exception:
+            self.events.put(("tool_update", ("error", "")))
+            return
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        version = ""
+        try:
+            version_result = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                creationflags=creationflags,
+            )
+            if version_result.stdout:
+                version = version_result.stdout.strip().splitlines()[0]
+        except Exception:
+            version = ""
+        if result.returncode != 0:
+            self.events.put(("tool_update", ("error", version)))
+        elif "updated yt-dlp" in output or "has been updated" in output:
+            self.events.put(("tool_update", ("updated", version)))
+        else:
+            self.events.put(("tool_update", ("current", version)))
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                event, payload = self.events.get_nowait()
+                if event == "analysis":
+                    url, data = payload
+                    self._apply_analysis(str(url), data)
+                elif event == "error":
+                    self.loading.stop()
+                    self.loading.grid_remove()
+                    self._set_status("status_bad_link")
+                    messagebox.showerror(APP_NAME, str(payload))
+                elif event == "line":
+                    self._log(str(payload))
+                elif event == "progress":
+                    value = float(payload)
+                    self.progress.set(value / 100)
+                    self._set_status("status_progress", value=value)
+                elif event == "tool_progress":
+                    tool_name, percent = payload
+                    if tool_name == "yt-dlp":
+                        self._set_tool_status("tool_downloading_yt_dlp", percent=percent)
+                    else:
+                        self._set_tool_status("tool_downloading_ffmpeg", percent=percent)
+                elif event == "tool_update":
+                    status, version = payload
+                    if status == "error":
+                        self._set_tool_status("tool_update_failed")
+                    elif status == "error_ffmpeg":
+                        self._set_tool_status("tool_download_failed_ffmpeg")
+                    elif status == "updated":
+                        if version:
+                            self._set_tool_status("tool_updated", version=version)
+                        else:
+                            self._set_tool_status("tool_updated_unknown")
+                    else:
+                        if version:
+                            self._set_tool_status("tool_up_to_date", version=version)
+                        else:
+                            self._set_tool_status("tool_up_to_date_unknown")
+                elif event == "finished":
+                    self.cancel_button.grid_remove()
+                    self.download_button.grid()
+                    if int(payload) == 0:
+                        self.progress.set(1)
+                        merged = self.mode == "video" and not self.separate_var.get()
+                        self._set_status("status_done_merged" if merged else "status_done")
+                        self.open_button.grid(row=0, column=2, sticky="e")
+                        self._log(self.tr("log_done"))
+                    else:
+                        self._set_status("status_failed")
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+    # ---------- misc ----------
+
+    def _choose_folder(self) -> None:
+        selected = filedialog.askdirectory(initialdir=self.output_var.get())
+        if selected:
+            self.output_var.set(selected)
+            self.folder_button.configure(text=self._folder_label())
+
+    def _folder_label(self) -> str:
+        return f"{self.tr('save_to')}  ·  {self.output_var.get()}"
+
+    def _toggle_log(self) -> None:
+        self.log_open = not self.log_open
+        if self.log_open:
+            self.log.grid(row=8, column=0, sticky="nsew", padx=34, pady=(0, 24))
+            self.content.grid_rowconfigure(8, weight=1)
+            self._apply_geometry(840, 1020)
+            self.log_button.configure(text=self.tr("hide_details"))
+        else:
+            self.log.grid_remove()
+            self.content.grid_rowconfigure(8, weight=0)
+            self._apply_geometry(840, 870)
+            self.log_button.configure(text=self.tr("details"))
+
+    def _log(self, text: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", text)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _cancel(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            self._set_status("status_cancelling")
+
+    def _open_folder(self) -> None:
+        folder = Path(self.output_var.get())
+        if os.name == "nt":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
+
+    def _close(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+        self.destroy()
+
+
+if __name__ == "__main__":
+    App().mainloop()

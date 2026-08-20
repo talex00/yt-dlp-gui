@@ -21,6 +21,7 @@ env:
   # "lgpl"        - один статический ffmpeg.exe, сборка заметно меньше
   # "lgpl-shared" - ffmpeg.exe + набор av*.dll, проще с требованием LGPL о перелинковке
   # Переключается одной строкой, остальной пайплайн менять не надо.
+  # Оба инструмента больше не кладутся в EXE — приложение скачивает их само при первом запуске.
   FFMPEG_VARIANT: lgpl
 
 jobs:
@@ -41,20 +42,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install customtkinter pyinstaller
 
-      - name: Download yt-dlp and its legal files
+      - name: Download yt-dlp legal files
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path "embedded" -Force | Out-Null
           New-Item -ItemType Directory -Path "legal" -Force | Out-Null
 
           $release = Invoke-RestMethod "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
           $tag = $release.tag_name
           "YT_DLP_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          # берём бинарник строго того же тега, что и тексты лицензий
-          Invoke-WebRequest `
-            -Uri "https://github.com/yt-dlp/yt-dlp/releases/download/$tag/yt-dlp.exe" `
-            -OutFile "embedded/yt-dlp.exe"
+          # бинарник больше не входит в EXE — приложение скачивает его само на первом запуске,
+          # но тексты лицензий всё равно берём из того же тега
           Invoke-WebRequest `
             -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$tag/LICENSE" `
             -OutFile "legal/YT-DLP-LICENSE.txt"
@@ -62,7 +60,7 @@ jobs:
             -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$tag/THIRD_PARTY_LICENSES.txt" `
             -OutFile "legal/YT-DLP-THIRD-PARTY-LICENSES.txt"
 
-      - name: Download LGPL FFmpeg build
+      - name: Detect FFmpeg build info and legal files
         shell: pwsh
         run: |
           $archive = "ffmpeg-master-latest-win64-$env:FFMPEG_VARIANT.zip"
@@ -71,13 +69,6 @@ jobs:
             -OutFile "ffmpeg-lgpl.zip"
           Expand-Archive "ffmpeg-lgpl.zip" "ffmpeg-lgpl"
           $root = Get-ChildItem "ffmpeg-lgpl" -Directory | Select-Object -First 1
-          Copy-Item "$($root.FullName)/bin/ffmpeg.exe" "embedded/ffmpeg.exe"
-
-          # у shared-сборки рядом с ffmpeg.exe лежат av*.dll, у статической их нет
-          $dlls = @(Get-ChildItem "$($root.FullName)/bin" -Filter "*.dll" -ErrorAction SilentlyContinue)
-          if ($dlls.Count -gt 0) {
-            $dlls | Copy-Item -Destination "embedded"
-          }
 
           Invoke-WebRequest `
             -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/LICENSE.md" `
@@ -89,14 +80,18 @@ jobs:
             -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv3" `
             -OutFile "legal/COPYING.LGPLv3.txt"
 
-          # точный коммит сборки нужен, чтобы сослаться на соответствующий исходник
-          $versionLine = (& "embedded/ffmpeg.exe" -version | Select-Object -First 1)
+          # точный коммит сборки нужен, чтобы сослаться на соответствующий исходник;
+          # сам бинарник здесь только для определения версии — в EXE он не попадает
+          $versionLine = (& "$($root.FullName)/bin/ffmpeg.exe" -version | Select-Object -First 1)
           if ($versionLine -match 'g([0-9a-f]{7,40})') {
             $commit = $Matches[1]
           } else {
             $commit = "master"
           }
           "FFMPEG_COMMIT=$commit" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Remove-Item "ffmpeg-lgpl.zip" -Force
+          Remove-Item "ffmpeg-lgpl" -Recurse -Force
 
       - name: Create third-party notice
         shell: pwsh
@@ -129,7 +124,10 @@ jobs:
              $ffmpegSource
 
           The GUI launches yt-dlp and FFmpeg as separate subprocesses and does not
-          link against their libraries.
+          link against their libraries. Neither binary is bundled inside this EXE:
+          on first run the app downloads both official binaries into a "tools"
+          folder next to its own executable, and refreshes yt-dlp there on every
+          later launch.
 
           WRITTEN OFFER
 
@@ -143,35 +141,16 @@ jobs:
           FFmpeg and yt-dlp are not affiliated with or endorsed by this project.
           "@ | Set-Content -Path "legal/THIRD-PARTY-NOTICES.txt" -Encoding UTF8
 
-      - name: Create runtime hook
-        shell: pwsh
-        run: |
-          @'
-          import os
-          import sys
-
-          bundle_dir = getattr(sys, "_MEIPASS", "")
-          if bundle_dir:
-              os.environ["PATH"] = bundle_dir + os.pathsep + os.environ.get("PATH", "")
-          '@ | Set-Content -Path "embedded_tools_path.py" -Encoding UTF8
-
       - name: Build single portable EXE
         shell: pwsh
         run: |
-          $binaryArgs = @()
-          Get-ChildItem "embedded" -File | ForEach-Object {
-            $binaryArgs += "--add-binary"
-            $binaryArgs += "$($_.FullName);."
-          }
-
-          # в legal лежат только текстовые уведомления (~270 КБ), архивов исходников больше нет
+          # в legal лежат только текстовые уведомления (~270 КБ); yt-dlp и ffmpeg
+          # больше не входят в EXE — они скачиваются в папку tools рядом с exe при первом запуске
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name yt-dlp-gui `
             --collect-all customtkinter `
-            --runtime-hook "embedded_tools_path.py" `
             --runtime-hook "dpi_physical_screen.py" `
             --add-data "legal;licenses" `
-            @binaryArgs `
             app.py
 
           $size = [math]::Round((Get-Item "dist/yt-dlp-gui.exe").Length / 1MB, 1)
@@ -194,9 +173,9 @@ jobs:
           )
 
           $notes = @"
-          Один готовый EXE для Windows. Внутри находятся официальный yt-dlp ($env:YT_DLP_TAG) и LGPL-сборка FFmpeg (коммит $env:FFMPEG_COMMIT).
+          Один готовый EXE для Windows. yt-dlp ($env:YT_DLP_TAG) и LGPL-сборка FFmpeg (коммит $env:FFMPEG_COMMIT) больше не входят в сам EXE — при первом запуске приложение само скачивает их в папку tools рядом с exe и обновляет при каждом следующем запуске.
 
-          Тексты лицензий приложены к релизу и лежат внутри EXE в папке licenses. Ссылки на соответствующие исходники и written offer — в THIRD-PARTY-NOTICES.txt.
+          Тексты лицензий приложены к релизу. Ссылки на соответствующие исходники и written offer — в THIRD-PARTY-NOTICES.txt.
           "@
 
           gh release create $tag @assets `

@@ -81,6 +81,12 @@ TEXTS: dict[str, dict[str, str]] = {
         "error_yt_dlp": "yt-dlp не найден рядом с программой.",
         "error_ffmpeg": "FFmpeg не найден. Он нужен для объединения видео, аудио и субтитров.",
         "error_code": "yt-dlp: код {code}",
+        "tool_checking": "yt-dlp: проверка обновлений…",
+        "tool_updated": "yt-dlp обновлён до {version}",
+        "tool_updated_unknown": "yt-dlp обновлён",
+        "tool_up_to_date": "yt-dlp: установлена последняя версия ({version})",
+        "tool_up_to_date_unknown": "yt-dlp: установлена последняя версия",
+        "tool_update_failed": "Не удалось проверить обновление yt-dlp · нажмите, чтобы повторить",
         "log_start": "\nЗапуск загрузки:\n",
         "log_done": "Готово.\n",
     },
@@ -121,6 +127,12 @@ TEXTS: dict[str, dict[str, str]] = {
         "error_yt_dlp": "yt-dlp was not found next to the app.",
         "error_ffmpeg": "FFmpeg was not found. It is required to merge video, audio and subtitles.",
         "error_code": "yt-dlp: exit code {code}",
+        "tool_checking": "yt-dlp: checking for updates…",
+        "tool_updated": "yt-dlp updated to {version}",
+        "tool_updated_unknown": "yt-dlp updated",
+        "tool_up_to_date": "yt-dlp: up to date ({version})",
+        "tool_up_to_date_unknown": "yt-dlp: up to date",
+        "tool_update_failed": "Could not check yt-dlp updates · click to retry",
         "log_start": "\nStarting download:\n",
         "log_done": "Done.\n",
     },
@@ -149,6 +161,47 @@ def find_tool(name: str) -> str | None:
     executable = f"{name}.exe" if os.name == "nt" else name
     local = app_dir() / executable
     return str(local) if local.is_file() else shutil.which(name)
+
+
+def local_tools_dir() -> Path:
+    """Writable, persistent location for embedded tools.
+
+    The bundled yt-dlp/ffmpeg binaries live inside a PyInstaller temp folder
+    that is recreated (and can be wiped) on every launch, so yt-dlp's own
+    self-update would have nothing durable to write to. A copy here survives
+    between runs and can be updated in place.
+    """
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    directory = base / "yt-dlp-gui" / "tools"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def ensure_local_copy(name: str) -> str | None:
+    """Return a persistent, writable path to an embedded tool.
+
+    On first use, the bundled binary (from the app folder or PATH) is copied
+    into `local_tools_dir()`. Later calls reuse that copy directly, which is
+    what lets yt-dlp's `--update` replace its own executable across runs.
+    """
+    executable = f"{name}.exe" if os.name == "nt" else name
+    target = local_tools_dir() / executable
+    if target.is_file():
+        return str(target)
+    bundled = find_tool(name)
+    if not bundled:
+        return None
+    bundled_path = Path(bundled)
+    try:
+        if bundled_path.resolve() == target.resolve():
+            return str(target)
+        shutil.copy2(bundled_path, target)
+        if name == "ffmpeg":
+            for dll in bundled_path.parent.glob("*.dll"):
+                shutil.copy2(dll, target.parent / dll.name)
+    except OSError:
+        return str(bundled_path)
+    return str(target)
 
 
 def codec(value: object) -> str:
@@ -219,6 +272,8 @@ class App(ctk.CTk):
         self.mode = "video"
         self.status_key: str | None = None
         self.status_args: dict[str, Any] = {}
+        self.tool_status_key: str | None = None
+        self.tool_status_args: dict[str, Any] = {}
 
         self.language_var = ctk.StringVar(value="RU")
         self.url_var = ctk.StringVar()
@@ -233,10 +288,13 @@ class App(ctk.CTk):
         self.title_var = ctk.StringVar(value="")
         self.meta_var = ctk.StringVar(value="")
         self.size_var = ctk.StringVar(value="")
+        self.tool_status_var = ctk.StringVar(value="")
 
         self._build()
+        self._set_tool_status("tool_checking")
         self.after(80, self._style_title_bar)
         self.after(100, self._poll)
+        self.after(300, self._start_yt_dlp_update)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     # ---------- scaling / native window ----------
@@ -372,6 +430,8 @@ class App(ctk.CTk):
             text=self.tr("download_video" if self.mode == "video" else "download_audio")
         )
         self._set_status(self.status_key, **self.status_args)
+        if self.tool_status_key:
+            self.tool_status_var.set(self.tr(self.tool_status_key, **self.tool_status_args))
         if self.revealed:
             self._render_quality_buttons()
             if self.mode == "video":
@@ -383,6 +443,11 @@ class App(ctk.CTk):
         self.status_key = key
         self.status_args = kwargs
         self.status_var.set(self.tr(key, **kwargs) if key else "")
+
+    def _set_tool_status(self, key: str, **kwargs: Any) -> None:
+        self.tool_status_key = key
+        self.tool_status_args = kwargs
+        self.tool_status_var.set(self.tr(key, **kwargs))
 
     def _audio_output(self) -> str:
         value = self.audio_output_var.get()
@@ -434,7 +499,9 @@ class App(ctk.CTk):
         self.url_entry.focus_set()
         self.loading = ctk.CTkProgressBar(search, height=3, mode="indeterminate")
 
-        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        # A scrollable frame keeps every option reachable (via the scrollbar or
+        # the mouse wheel) once the window is resized smaller than the content.
+        self.content = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.content.grid_columnconfigure(0, weight=1)
 
         info = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -631,6 +698,16 @@ class App(ctk.CTk):
             hover_color=("#e9e9e6", "#252525"),
             command=self._open_folder,
         )
+        self.tool_status_label = ctk.CTkLabel(
+            footer,
+            textvariable=self.tool_status_var,
+            anchor="w",
+            text_color=("#8f8f89", "#8c8c8c"),
+            font=ctk.CTkFont(size=11),
+            cursor="hand2",
+        )
+        self.tool_status_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.tool_status_label.bind("<Button-1>", lambda _event: self._start_yt_dlp_update())
         self.log = ctk.CTkTextbox(
             self.content,
             height=170,
@@ -682,7 +759,7 @@ class App(ctk.CTk):
         url = self.url_var.get().strip()
         if not url.startswith(("http://", "https://")) or self.process:
             return
-        executable = find_tool("yt-dlp")
+        executable = ensure_local_copy("yt-dlp")
         if not executable:
             messagebox.showerror(APP_NAME, self.tr("error_yt_dlp"))
             return
@@ -1051,7 +1128,9 @@ class App(ctk.CTk):
         self.content.grid(row=1, column=0, sticky="nsew")
         self.revealed = True
         self._apply_geometry(840, 870)
-        self._apply_minsize(700, 660)
+        # Content now scrolls, so the window can shrink well below its natural
+        # height/width without hiding any option from the user.
+        self._apply_minsize(620, 400)
 
     def _hide_content(self) -> None:
         self.content.grid_remove()
@@ -1064,7 +1143,7 @@ class App(ctk.CTk):
     def _download(self) -> None:
         if self.process or self.analyzed_url != self.url_var.get().strip():
             return
-        executable = find_tool("yt-dlp")
+        executable = ensure_local_copy("yt-dlp")
         if not executable:
             messagebox.showerror(APP_NAME, self.tr("error_yt_dlp"))
             return
@@ -1074,7 +1153,7 @@ class App(ctk.CTk):
             and self.subtitle_var.get()
             and bool(self.selected_subtitle_code)
         )
-        if self.mode == "video" and (not separate or subtitles) and not find_tool("ffmpeg"):
+        if self.mode == "video" and (not separate or subtitles) and not ensure_local_copy("ffmpeg"):
             messagebox.showerror(APP_NAME, self.tr("error_ffmpeg"))
             return
         folder = Path(self.output_var.get()).expanduser()
@@ -1101,7 +1180,7 @@ class App(ctk.CTk):
     def _download_command(self, executable: str, folder: Path) -> list[str]:
         separate = self.separate_var.get() and self.mode == "video"
         template = "%(title)s [%(format_id)s].%(ext)s" if separate else "%(title)s [%(id)s].%(ext)s"
-        ffmpeg = find_tool("ffmpeg")
+        ffmpeg = ensure_local_copy("ffmpeg")
         ffmpeg_location = str(Path(ffmpeg).parent) if ffmpeg else str(app_dir())
         command = [
             executable,
@@ -1158,6 +1237,60 @@ class App(ctk.CTk):
         self.process = None
         self.events.put(("finished", code))
 
+    # ---------- yt-dlp self-update ----------
+
+    def _start_yt_dlp_update(self) -> None:
+        """Refresh the persistent yt-dlp copy so it stays current between runs.
+
+        yt-dlp ships new releases far more often than this wrapper does, so
+        relying only on the bundled binary would leave users stuck on
+        whatever version was current when they downloaded the app.
+        """
+        self._set_tool_status("tool_checking")
+        threading.Thread(target=self._run_yt_dlp_update, daemon=True).start()
+
+    def _run_yt_dlp_update(self) -> None:
+        executable = ensure_local_copy("yt-dlp")
+        if not executable:
+            self.events.put(("tool_update", ("error", "")))
+            return
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            result = subprocess.run(
+                [executable, "--update"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+                creationflags=creationflags,
+            )
+        except Exception:
+            self.events.put(("tool_update", ("error", "")))
+            return
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        version = ""
+        try:
+            version_result = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                creationflags=creationflags,
+            )
+            if version_result.stdout:
+                version = version_result.stdout.strip().splitlines()[0]
+        except Exception:
+            version = ""
+        if result.returncode != 0:
+            self.events.put(("tool_update", ("error", version)))
+        elif "updated yt-dlp" in output or "has been updated" in output:
+            self.events.put(("tool_update", ("updated", version)))
+        else:
+            self.events.put(("tool_update", ("current", version)))
+
     def _poll(self) -> None:
         try:
             while True:
@@ -1176,6 +1309,20 @@ class App(ctk.CTk):
                     value = float(payload)
                     self.progress.set(value / 100)
                     self._set_status("status_progress", value=value)
+                elif event == "tool_update":
+                    status, version = payload
+                    if status == "error":
+                        self._set_tool_status("tool_update_failed")
+                    elif status == "updated":
+                        if version:
+                            self._set_tool_status("tool_updated", version=version)
+                        else:
+                            self._set_tool_status("tool_updated_unknown")
+                    else:
+                        if version:
+                            self._set_tool_status("tool_up_to_date", version=version)
+                        else:
+                            self._set_tool_status("tool_up_to_date_unknown")
                 elif event == "finished":
                     self.cancel_button.grid_remove()
                     self.download_button.grid()

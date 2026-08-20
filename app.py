@@ -164,15 +164,17 @@ def find_tool(name: str) -> str | None:
 
 
 def local_tools_dir() -> Path:
-    """Writable, persistent location for embedded tools.
+    """Writable location for embedded tools, kept next to the app itself.
 
     The bundled yt-dlp/ffmpeg binaries live inside a PyInstaller temp folder
     that is recreated (and can be wiped) on every launch, so yt-dlp's own
-    self-update would have nothing durable to write to. A copy here survives
-    between runs and can be updated in place.
+    self-update would have nothing durable to write to. To keep the app
+    portable, the working copy is stored in a "tools" folder next to the
+    app's own executable (never in the user's system profile), so it travels
+    along whenever the app folder is copied or moved, and can still be
+    updated in place between runs.
     """
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-    directory = base / "yt-dlp-gui" / "tools"
+    directory = app_dir() / "tools"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

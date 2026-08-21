@@ -155,6 +155,9 @@ jobs:
 
           $size = [math]::Round((Get-Item "dist/yt-dlp-gui.exe").Length / 1MB, 1)
           "Single EXE size: $size MB" | Write-Host
+          if ($size -gt 60) {
+            Write-Output "::warning::EXE is $size MB — expected under 60 MB without bundled yt-dlp/ffmpeg"
+          }
 
       - name: Publish GitHub release
         shell: pwsh

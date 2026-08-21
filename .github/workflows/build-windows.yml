@@ -56,12 +56,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-${{ github.run_number }}"
-          $notes = @"
-          Один готовый EXE для Windows. yt-dlp и FFmpeg скачиваются автоматически при первом запуске в папку tools рядом с программой.
-          "@"
-
-          gh release create $tag "dist/yt-dlp-gui.exe#yt-dlp-gui.exe" `
+          gh release create $tag dist/yt-dlp-gui.exe `
             --target "${{ github.sha }}" `
             --title "yt-dlp GUI — build ${{ github.run_number }}" `
-            --notes $notes `
+            --notes "One portable EXE for Windows. yt-dlp and FFmpeg are downloaded automatically on first launch into a tools folder next to the executable." `
             --latest
